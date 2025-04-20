@@ -883,22 +883,7 @@ Focus on security implications and best practices while maintaining high code qu
         """Generate code fix using LLM based on the query and found code snippets."""
         if not code_snippets:
             logger.warning("No code snippets provided for fix generation")
-            return {
-                "explanation": "No code snippets available for analysis",
-                "fixed_code": "",
-                "file_path": "",
-                "changes": [],
-                "security_review": {
-                    "vulnerabilities_fixed": [],
-                    "security_improvements": [],
-                    "risk_level": "unknown"
-                },
-                "quality_metrics": {
-                    "maintainability": "unknown",
-                    "complexity": "unknown",
-                    "test_coverage_impact": "unknown"
-                }
-            }
+            return self._generate_error_response("No code snippets available for analysis")
             
         # Prepare context from code snippets (limit to most relevant)
         relevant_snippets = sorted(code_snippets, key=lambda x: x.get('score', 0), reverse=True)[:2]
@@ -909,12 +894,16 @@ Focus on security implications and best practices while maintaining high code qu
         
         system_prompt = """You are an elite senior software architect and security expert. Your task is to analyze code and provide fixes in a specific JSON format.
 
-IMPORTANT: Your response must be ONLY valid JSON, with no additional text, markdown, or explanation outside the JSON structure.
+IMPORTANT: 
+1. Your response must be ONLY valid JSON, with no additional text or markdown
+2. All code in the response must be properly escaped for JSON
+3. All strings must use double quotes, not single quotes
+4. Ensure all code is syntactically correct before including it
 
 Example response format:
 {
     "explanation": "Brief explanation of changes",
-    "fixed_code": "Complete fixed code",
+    "fixed_code": "def example():\\n    return True",
     "file_path": "path/to/file",
     "changes": [
         {
@@ -937,14 +926,21 @@ Query: {query}
 Analysis: {json.dumps(analysis, indent=2)}
 Context: {code_context}
 
-Respond with ONLY a JSON object containing:
+Requirements:
+1. Response must be ONLY a JSON object
+2. All code must be properly escaped for JSON
+3. Use double quotes for strings
+4. Ensure all code is syntactically valid
+5. Include complete implementation
+
+Fields required in response:
 1. explanation: Brief explanation of changes
-2. fixed_code: Complete fixed code
+2. fixed_code: Complete fixed code (properly escaped)
 3. file_path: Path to file being modified
-4. changes: Array of specific changes (line number, original, replacement, explanation)
+4. changes: Array of specific changes
 5. security_review: Security analysis object
 
-DO NOT include any text outside the JSON structure. Ensure the response is valid JSON."""
+DO NOT include any text outside the JSON structure."""
         
         try:
             # Try each provider in sequence until one succeeds
@@ -959,49 +955,21 @@ DO NOT include any text outside the JSON structure. Ensure the response is valid
                     logger.debug("Raw code fix response: %s", content)
                     
                     try:
-                        # Strip any potential non-JSON content
-                        content = content.strip()
-                        if content.startswith("```json"):
-                            content = content[7:]
-                        if content.endswith("```"):
-                            content = content[:-3]
-                        content = content.strip()
+                        # Clean and validate the response
+                        content = self._clean_json_response(content)
                         
+                        # Parse the cleaned JSON
                         code_fix = json.loads(content)
                         
-                        # Validate required fields
-                        required_fields = {
-                            'explanation': str,
-                            'security_review': dict,
-                            'quality_metrics': dict,
-                            'performance_impact': dict,
-                            'fixed_code': str,
-                            'file_path': str,
-                            'changes': list,
-                            'testing_recommendations': list,
-                            'documentation_updates': list
-                        }
+                        # Validate and fix the code fix
+                        code_fix = self._validate_and_fix_response(code_fix)
                         
-                        # Initialize missing fields with default values
-                        for field, field_type in required_fields.items():
-                            if field not in code_fix:
-                                if field_type == str:
-                                    code_fix[field] = ""
-                                elif field_type == list:
-                                    code_fix[field] = []
-                                elif field_type == dict:
-                                    code_fix[field] = {}
-                        
-                        # Calculate quality score
-                        total_fields = len(required_fields)
-                        filled_fields = sum(1 for f in required_fields if code_fix.get(f))
-                        code_fix['quality_score'] = filled_fields / total_fields
-                        
-                        logger.info("Generated code fix with quality score: %.2f", code_fix['quality_score'])
+                        logger.info("Generated code fix with quality score: %.2f", code_fix.get('quality_score', 0))
                         return code_fix
                         
                     except json.JSONDecodeError as je:
                         logger.error("JSON parsing error in code fix at position %d: %s", je.pos, je.msg)
+                        logger.debug("Problematic content: %s", content[max(0, je.pos-50):min(len(content), je.pos+50)])
                         continue
                 except Exception as e:
                     logger.error(f"Error with provider {provider.__class__.__name__}: {str(e)}")
@@ -1013,7 +981,86 @@ DO NOT include any text outside the JSON structure. Ensure the response is valid
         except Exception as e:
             logger.error("Error generating code fix: %s", str(e), exc_info=True)
             return self._generate_error_response(f"Error generating code fix: {str(e)}")
+
+    def _clean_json_response(self, content: str) -> str:
+        """Clean and prepare the response for JSON parsing."""
+        # Remove any markdown code blocks
+        content = content.replace("```json", "").replace("```", "")
+        
+        # Remove any leading/trailing whitespace
+        content = content.strip()
+        
+        # Remove any non-JSON content before the first { or after the last }
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start >= 0 and end > start:
+            content = content[start:end]
             
+        # Replace any single quotes with double quotes (only outside of code blocks)
+        in_code = False
+        cleaned = []
+        for char in content:
+            if char == '`':
+                in_code = not in_code
+            elif char == "'" and not in_code:
+                char = '"'
+            cleaned.append(char)
+        content = ''.join(cleaned)
+        
+        return content
+
+    def _validate_and_fix_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and fix the response structure."""
+        # Required fields with their default values
+        required_fields = {
+            'explanation': '',
+            'fixed_code': '',
+            'file_path': '',
+            'changes': [],
+            'security_review': {
+                'vulnerabilities_fixed': [],
+                'security_improvements': [],
+                'risk_level': 'unknown'
+            },
+            'quality_metrics': {
+                'maintainability': 'unknown',
+                'complexity': 'unknown',
+                'test_coverage_impact': 'unknown'
+            }
+        }
+        
+        # Ensure all required fields exist
+        for field, default in required_fields.items():
+            if field not in response:
+                response[field] = default
+            elif isinstance(default, dict) and isinstance(response[field], dict):
+                # Ensure nested fields exist
+                for nested_field, nested_default in default.items():
+                    if nested_field not in response[field]:
+                        response[field][nested_field] = nested_default
+        
+        # Validate code syntax if possible
+        if response['fixed_code']:
+            try:
+                compile(response['fixed_code'], '<string>', 'exec')
+            except SyntaxError as e:
+                logger.warning(f"Syntax error in generated code: {str(e)}")
+                response['syntax_check'] = {
+                    'status': 'failed',
+                    'error': str(e)
+                }
+            else:
+                response['syntax_check'] = {
+                    'status': 'passed'
+                }
+        
+        # Calculate quality score
+        total_fields = len(required_fields)
+        filled_fields = sum(1 for f in required_fields if response.get(f))
+        response['quality_score'] = filled_fields / total_fields
+        
+        return response
+
     def _generate_error_response(self, error_message: str) -> Dict[str, Any]:
         """Generate a standardized error response for code fix failures."""
         return {
