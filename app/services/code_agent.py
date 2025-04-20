@@ -564,8 +564,8 @@ class CodeAgent:
             processed_results = []
             for match in results:  # Results is already a list of ScoredPoint objects
                 payload = match.payload
-                # Filter out results where 'code' might be missing or empty in payload
-                if payload and payload.get('code'):
+                # Filter out results where 'code' is missing or None
+                if payload and payload.get('code') is not None:
                     processed_results.append({
                         'code': payload.get('code', ''), # Ensure 'code' key is used
                         'file_path': payload.get('file_path', ''),
@@ -636,12 +636,14 @@ IMPORTANT RESPONSE RULES:
 4. Ensure all strings within the JSON are properly escaped (e.g., use \\n for newlines in code).
 5. Use double quotes for all JSON keys and string values.
 6. If no fix is needed or possible, provide an explanation within the JSON structure.
+7. The value for the 'fixed_code' key MUST be a single JSON string containing the complete fixed code snippet, OR null if not applicable.
+8. The value for the 'file_path' key MUST be a single JSON string representing the primary file path affected, OR null if not applicable.
 
 Example response format:
 {
     "explanation": "Brief explanation of the fix or why no fix is needed.",
-    "fixed_code": "def example():\\n    return True", // Optional: full fixed code snippet
-    "file_path": "path/to/relevant/file", // Optional: which file the fix likely applies to
+    "fixed_code": "def example():\\n    return True", // MUST be a single string or null
+    "file_path": "path/to/relevant/file", // MUST be a single string or null
     "changes": [ // Optional: specific line-by-line changes
         {
             "line_number": 1,
@@ -662,13 +664,15 @@ Initial Analysis:
 Relevant Code Context:
 {code_context}
 
-STRICT RESPONSE RULES:
+STRICT RESPONSE RULES (REPEAT):
 1. Return ONLY a valid JSON object adhering to the structure specified in the system prompt.
 2. NO markdown formatting around the JSON.
 3. NO explanatory text outside the JSON object.
 4. Ensure all JSON strings are properly escaped (use \\n for newlines).
 5. Use double quotes for all keys and string values.
-6. Provide specific changes in the 'changes' array if applicable."""
+6. The value for 'fixed_code' MUST be a single JSON string or null.
+7. The value for 'file_path' MUST be a single JSON string or null.
+8. Provide specific changes in the 'changes' array if applicable."""
 
         try:
             messages = [
