@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     # LLM Provider Configuration
     llm_provider: str = "openrouter"  # openai, openrouter, ollama, or vllm
     
+    # Embedding Configuration
+    embedding_dimension: int = 1536  # Default dimension for text-embedding-3-small
+    
     # OpenAI Configuration
     openai_api_key: str = ""
     openai_model: str = "gpt-4-1106-preview"

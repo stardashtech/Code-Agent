@@ -1,14 +1,22 @@
 import asyncio
-from app.services.code_agent import CodeAgent
+from app.services.code_agent import CodeAgent, Config
 import logging
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 async def main():
-    # 1. Initialize the CodeAgent
-    agent = CodeAgent()
+    # 1. Initialize the Config and CodeAgent
+    config = Config(
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        openai_model="gpt-4",
+        embedding_dimension=1536,
+        qdrant_host="localhost",
+        qdrant_port=6333
+    )
+    agent = CodeAgent(config)
     logger.info("Initialized CodeAgent")
     
     # 2. Store some sample code
@@ -56,7 +64,7 @@ if __name__ == "__main__":
             # Clear existing collection only for the first file
             clear_existing = first_file
             result = await agent.store_code(file_path, content, "python", clear_existing=clear_existing)
-            logger.info(f"Stored {file_path} in collection {agent.get_collection_name()}: {result}")
+            logger.info(f"Stored {file_path} in collection {agent.collection_name}: {result}")
             first_file = False
     except Exception as e:
         logger.error(f"Error storing code: {str(e)}")
@@ -78,23 +86,22 @@ if __name__ == "__main__":
             
             # Print analysis
             logger.info("\nAnalysis:")
-            logger.info(f"Error Type: {result['analysis'].get('error_type', 'N/A')}")
-            logger.info(f"Description: {result['analysis'].get('description', 'N/A')}")
+            logger.info(result['analysis'])
             
             # Print found code snippets
             logger.info("\nRelevant Code Snippets:")
             for snippet in result['code_snippets']:
-                logger.info(f"\nFile: {snippet.get('file_path', 'unknown')}")
-                logger.info(f"Score: {snippet.get('score', 0):.2f}")
+                logger.info(f"\nFile: {snippet['file_path']}")
+                logger.info(f"Score: {snippet.get('similarity', 0):.2f}")
                 logger.info("Content:")
-                logger.info(snippet.get('content', ''))
+                logger.info(snippet['code'])
             
             # Print suggested fix
             logger.info("\nSuggested Fix:")
-            logger.info(f"Explanation: {result['code_fix'].get('explanation', 'N/A')}")
-            if result['code_fix'].get('fixed_code'):
-                logger.info("\nFixed Code:")
-                logger.info(result['code_fix']['fixed_code'])
+            if result['code_fix']['status'] == 'success':
+                logger.info(result['code_fix']['explanation'])
+            else:
+                logger.info(f"Error: {result['code_fix'].get('message', 'Unknown error')}")
             
             logger.info("\n" + "="*80)
         except Exception as e:

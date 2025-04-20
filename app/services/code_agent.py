@@ -10,16 +10,45 @@ import aiohttp
 import redis
 import requests
 from openai import OpenAI
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 from qdrant_client.http.models import Distance, PointStruct, VectorParams
 from qdrant_client.http.models import Filter as QdrantFilter
 from qdrant_client.http.models import FieldCondition, MatchValue
 import hashlib
 from datetime import datetime, timedelta
+import re
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+class Config:
+    """Configuration class for CodeAgent"""
+    def __init__(
+        self,
+        openai_api_key: Optional[str] = None,
+        openai_model: str = "gpt-4",
+        openrouter_api_key: Optional[str] = None,
+        openrouter_model: str = "openai/gpt-4",
+        ollama_model: str = "codellama",
+        embedding_dimension: int = 1536,
+        qdrant_host: str = "localhost",
+        qdrant_port: int = 6333,
+        redis_host: str = "localhost",
+        redis_port: int = 6379,
+        cache_ttl: int = 3600
+    ):
+        self.openai_api_key = openai_api_key
+        self.openai_model = openai_model
+        self.openrouter_api_key = openrouter_api_key
+        self.openrouter_model = openrouter_model
+        self.ollama_model = ollama_model
+        self.embedding_dimension = embedding_dimension
+        self.qdrant_host = qdrant_host
+        self.qdrant_port = qdrant_port
+        self.redis_host = redis_host
+        self.redis_port = redis_port
+        self.cache_ttl = cache_ttl
 
 class LLMProvider:
     """Base class for LLM providers"""
@@ -74,23 +103,55 @@ class OpenRouterProvider(LLMProvider):
             base_url="https://openrouter.ai/api/v1"
         )
         self.model = model
-        # Initialize Ollama for embeddings
-        self.ollama_provider = OllamaProvider()
+        logger.info(f"Initialized OpenRouterProvider with model {model}")
         
     async def generate_completion(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature
-        )
-        return response.choices[0].message.content
+        """Generate completion using OpenRouter API."""
+        try:
+            # Log request details
+            logger.debug(f"Sending request to OpenRouter - Model: {self.model}, Temperature: {temperature}")
+            logger.debug(f"Messages: {messages}")
+            
+            # Make API request with proper parameters
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=2000,
+                timeout=30
+            )
+            
+            # Log raw response for debugging
+            logger.debug(f"OpenRouter raw response: {response}")
+            
+            # Validate response structure
+            if not response or not hasattr(response, 'choices') or not response.choices:
+                raise ValueError("Invalid or empty response from OpenRouter")
+                
+            choice = response.choices[0]
+            if not choice or not hasattr(choice, 'message') or not choice.message:
+                raise ValueError("No valid message in OpenRouter response")
+                
+            content = choice.message.content
+            if not content or not isinstance(content, str):
+                raise ValueError("Invalid content in OpenRouter response")
+                
+            # Log successful completion
+            logger.info("Successfully generated completion via OpenRouter")
+            return content.strip()
+            
+        except Exception as e:
+            logger.error(f"OpenRouter completion failed: {str(e)}")
+            raise  # Re-raise the exception to be handled by caller
         
     async def generate_embedding(self, text: str) -> List[float]:
-        """Generate embeddings using Ollama since OpenRouter doesn't support embeddings"""
+        """Generate embeddings using OpenRouter API."""
         try:
-            return await self.ollama_provider.generate_embedding(text)
+            # OpenRouter doesn't support embeddings directly
+            # You might want to implement a different embedding provider here
+            raise NotImplementedError("OpenRouter does not support embeddings")
         except Exception as e:
-            logger.error(f"Error generating embedding via Ollama: {str(e)}")
+            logger.error(f"Error generating embedding via OpenRouter: {str(e)}")
             raise
 
 class OllamaProvider(LLMProvider):
@@ -345,538 +406,159 @@ class StackOverflowSearchProvider(CodeSearchProvider):
                 return result.get("items", [])
 
 class CodeAgent:
-    """Code Agent service that handles code search, analysis, and correction using LLMs."""
-    
-    def __init__(self):
-        """Initialize the CodeAgent service with necessary clients and configuration."""
-        self.executor = ThreadPoolExecutor(max_workers=settings.worker_count)
+    """Main agent class that handles LLM interactions"""
+    def __init__(self, config: Config):
+        """Initialize the code agent with the appropriate provider based on config"""
+        self.config = config
+        self.provider = None
+        self.executor = ThreadPoolExecutor()
         
-        # Set embedding dimension based on model
-        if settings.openrouter_embedding_provider == "openai":
-            settings.embedding_dimension = 1024  # OpenAI text-embedding-3-small dimension
-        else:
-            settings.embedding_dimension = 768   # nomic-embed-text dimension
+        # Initialize the appropriate provider based on configuration
+        if config.openai_api_key:
+            logger.info("Initializing OpenAI provider")
+            self.provider = OpenAIProvider(config.openai_api_key, config.openai_model)
             
-        logger.info(f"Using embedding dimension: {settings.embedding_dimension}")
+        elif config.openrouter_api_key:
+            logger.info("Initializing OpenRouter provider")
+            self.provider = OpenRouterProvider(config.openrouter_api_key, config.openrouter_model)
+            
+        else:
+            logger.info("Initializing Ollama provider")
+            self.provider = OllamaProvider()
+            
+        if not self.provider:
+            raise ValueError("No valid LLM provider could be initialized")
+            
+        # Initialize Qdrant client
+        self.qdrant_client = QdrantClient(
+            host=config.qdrant_host,
+            port=config.qdrant_port
+        )
         
         # Initialize Redis client
+        self.redis_client = redis.Redis(
+            host=config.redis_host,
+            port=config.redis_port,
+            decode_responses=True
+        )
+        
+        # Set collection name
+        self.collection_name = self._get_collection_name()
+        
+        # Ensure collection exists
+        self._ensure_collection_exists()
+        
+        logger.info("CodeAgent initialized successfully")
+        
+    async def generate_completion(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
+        """Generate completion using the configured provider"""
         try:
-            self.redis_client = redis.from_url(
-                settings.redis_url,
-                password=settings.redis_password,
-                decode_responses=True,
-                socket_timeout=5.0,
-                socket_connect_timeout=5.0,
-                retry_on_timeout=True,
-                max_connections=10,
-                health_check_interval=30,
-            )
-            # Test connection
-            self.redis_client.ping()
-            logger.info("Successfully initialized Redis client")
-        except redis.ConnectionError as e:
-            logger.info("Redis server is not available, continuing without caching")
-            self.redis_client = None
+            return await self.provider.generate_completion(messages, temperature)
         except Exception as e:
-            logger.warning(f"Unexpected error initializing Redis client: {str(e)}")
-            self.redis_client = None
-        
-        # Initialize LLM providers
-        self.llm_providers: List[LLMProvider] = []
-        
-        if settings.llm_provider == "openai":
-            # Initialize OpenAI provider if API key is available
-            if settings.openai_api_key:
-                try:
-                    self.llm_providers.append(OpenAIProvider(settings.openai_api_key, settings.openai_model))
-                    logger.info("Successfully initialized OpenAI provider with model: %s", settings.openai_model)
-                except Exception as e:
-                    logger.error(f"Failed to initialize OpenAI provider: {str(e)}")
-            else:
-                logger.error("OpenAI selected as provider but API key is missing")
-                
-        elif settings.llm_provider == "openrouter":
-            # Initialize OpenRouter provider if API key is available
-            if settings.openrouter_api_key:
-                try:
-                    self.llm_providers.append(OpenRouterProvider(
-                        settings.openrouter_api_key,
-                        settings.openrouter_model
-                    ))
-                    logger.info("Successfully initialized OpenRouter provider with model: %s", settings.openrouter_model)
-                except Exception as e:
-                    logger.error(f"Failed to initialize OpenRouter provider: {str(e)}")
-            else:
-                logger.error("OpenRouter selected as provider but API key is missing")
-                
-        elif settings.llm_provider == "ollama":
-            # Initialize Ollama provider
-            try:
-                self.llm_providers.append(OllamaProvider())
-                logger.info("Successfully initialized Ollama provider with model: %s and embedding model: %s",
-                           settings.ollama_model, settings.ollama_embedding_model)
-            except Exception as e:
-                logger.error(f"Failed to initialize Ollama provider: {str(e)}")
-                
-        elif settings.llm_provider == "vllm":
-            # Initialize vLLM provider
-            try:
-                self.llm_providers.append(VLLMProvider())
-                logger.info("Successfully initialized vLLM provider with model: %s and embedding model: %s",
-                           settings.vllm_model, settings.vllm_embedding_model)
-            except Exception as e:
-                logger.error(f"Failed to initialize vLLM provider: {str(e)}")
-        else:
-            logger.error(f"Unknown LLM provider: {settings.llm_provider}")
-            
-        # Ensure at least one provider is available
-        if not self.llm_providers:
-            raise ValueError(f"No LLM providers available for selected provider: {settings.llm_provider}")
-            
-        # Initialize code search providers
-        self.search_providers: List[CodeSearchProvider] = []
-        
-        # Initialize GitHub search
-        if settings.github_token:
-            self.search_providers.append(GitHubSearchProvider(settings.github_token))
-            
-        # Initialize Stack Overflow search
-        if settings.stackoverflow_key:
-            self.search_providers.append(StackOverflowSearchProvider(settings.stackoverflow_key))
-            
-        # Initialize vector store
-        try:
-            if not settings.qdrant_url:
-                raise ValueError("Qdrant URL is required")
-                
-            logger.info(f"Connecting to Qdrant at: {settings.qdrant_url}")
-            self.qdrant_client = QdrantClient(
-                url=settings.qdrant_url,
-                api_key=settings.qdrant_api_key or None,
-                timeout=10
-            )
-            self.collection_name = self._get_collection_name()
-            self._ensure_collection_exists()
-            logger.info("Successfully initialized Qdrant client")
-        except Exception as e:
-            logger.error(f"Failed to initialize Qdrant client: {str(e)}", exc_info=True)
+            logger.error(f"Error generating completion: {str(e)}")
             raise
-        
-        # Log successful initialization
-        provider_info = f"OpenAI ({settings.openai_model})" if settings.llm_provider == "openai" else f"Ollama ({settings.ollama_model})"
-        logger.info("CodeAgent initialized with provider: %s and collection: %s", 
-                   provider_info, self.collection_name)
+            
+    async def generate_embedding(self, text: str) -> List[float]:
+        """Generate embeddings using the configured provider"""
+        try:
+            return await self.provider.generate_embedding(text)
+        except Exception as e:
+            logger.error(f"Error generating embedding: {str(e)}")
+            raise
 
     def _get_collection_name(self) -> str:
-        """Get the collection name based on the current provider and embedding dimension."""
-        base_name = settings.qdrant_collection
-        provider = settings.llm_provider
-        dim = settings.embedding_dimension
-        return f"{base_name}_{provider}_{dim}"
-
-    def get_collection_name(self) -> str:
-        """Public method to get the current collection name."""
-        return self._get_collection_name()
-
-    def _delete_collection(self) -> None:
-        """Delete the current collection if it exists."""
+        """Get the collection name based on the current configuration"""
+        return f"code_embeddings_{self.config.embedding_dimension}"
+        
+    def _ensure_collection_exists(self):
+        """Ensure the vector store collection exists with correct configuration"""
         try:
-            collections = self.qdrant_client.get_collections()
-            if self.collection_name in [c.name for c in collections.collections]:
-                logger.info(f"Deleting collection: {self.collection_name}")
-                self.qdrant_client.delete_collection(self.collection_name)
-                logger.info(f"Successfully deleted collection: {self.collection_name}")
-        except Exception as e:
-            logger.error(f"Error deleting collection: {str(e)}")
-            raise
-
-    def _ensure_collection_exists(self) -> None:
-        """Ensure the vector collection exists with correct parameters"""
-        try:
-            # List all collections
             collections = self.qdrant_client.get_collections().collections
-            collection_names = [c.name for c in collections]
+            exists = any(c.name == self.collection_name for c in collections)
             
-            # Delete all code_snippets collections
-            for name in collection_names:
-                if name.startswith("code_snippets"):
-                    logger.info(f"Deleting collection: {name}")
-                    self.qdrant_client.delete_collection(name)
-            
-            # Create new collection
-            logger.info(f"Creating new Qdrant collection: {self.collection_name}")
-            self.qdrant_client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=settings.embedding_dimension,
-                    distance=Distance.COSINE
+            if not exists:
+                self.qdrant_client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(
+                        size=self.config.embedding_dimension,
+                        distance=Distance.COSINE
+                    )
                 )
-            )
-            logger.info("Successfully created Qdrant collection")
-            
+                logger.info(f"Created new collection: {self.collection_name}")
+            else:
+                logger.info(f"Using existing collection: {self.collection_name}")
+                
         except Exception as e:
             logger.error(f"Error ensuring collection exists: {str(e)}")
             raise
-
-    async def run(self, query: str) -> Dict[str, Any]:
-        """Run the agent on the given query asynchronously."""
-        logger.info("Processing query: %s", query)
-        
-        # Delegate CPU-bound operations to the thread pool
-        return await asyncio.get_event_loop().run_in_executor(
-            self.executor, self._run_sync, query
-        )
-
-    def _run_sync(self, query: str) -> Dict[str, Any]:
-        """Synchronous implementation of the agent run logic."""
+            
+    async def search_code(self, query: str) -> List[Dict]:
+        """Search for relevant code snippets based on the query"""
         try:
-            # 1. Analyze the query
-            analysis = self._analyze_query(query)
+            # Get query embedding
+            query_embedding = await self._get_embedding(query)
             
-            # Check if analysis has an error
-            if "error_type" in analysis and analysis["error_type"] in ["initialization_error", "api_error"]:
-                return {
-                    "analysis": analysis,
-                    "code_snippets": [],
-                    "code_fix": {
-                        "explanation": f"Cannot generate code fix: {analysis.get('description', 'Unknown error')}",
-                        "fixed_code": "",
-                        "file_path": "",
-                        "changes": []
-                    }
-                }
-            
-            # 2. Search for relevant code
-            code_snippets = self._search_code(query, analysis.get("search_terms", []))
-            
-            # 3. Generate fix with LLM
-            if not code_snippets:
-                logger.warning("No code snippets found for query: %s", query)
-                return {
-                    "analysis": analysis,
-                    "code_snippets": [],
-                    "code_fix": {
-                        "explanation": "No relevant code found for the query",
-                        "fixed_code": "",
-                        "file_path": "",
-                        "changes": []
-                    }
-                }
-            
-            code_fix = self._generate_code_fix(query, code_snippets, analysis)
-            
-            # 4. Save the interaction
-            try:
-                self._save_interaction(query, code_snippets, code_fix)
-            except Exception as e:
-                logger.error(f"Error saving interaction: {str(e)}")
-                # Continue even if saving fails
-            
-            return {
-                "analysis": analysis,
-                "code_snippets": code_snippets,
-                "code_fix": code_fix
-            }
-        except Exception as e:
-            logger.error("Error processing query: %s", str(e), exc_info=True)
-            # Return a structured response even in case of error
-            return {
-                "analysis": {
-                    "error_type": "processing_error",
-                    "description": f"Error processing query: {str(e)}"
-                },
-                "code_snippets": [],
-                "code_fix": {
-                    "explanation": f"Error during processing: {str(e)}",
-                    "fixed_code": "",
-                    "file_path": "",
-                    "changes": []
-                }
-            }
-
-    def _analyze_query(self, query: str) -> Dict[str, Any]:
-        """Analyze the query to understand the problem and extract search terms."""
-        system_prompt = """You are an elite senior software architect and security expert with extensive experience in multiple programming languages and frameworks. Your expertise includes:
-
-1. Security vulnerability detection and remediation
-2. Code quality assessment and improvement
-3. Performance optimization
-4. Design patterns and best practices
-5. Language-specific idioms and conventions
-
-For each query, provide a comprehensive analysis including:
-1. Problem categorization and severity assessment
-2. Potential security implications
-3. Performance considerations
-4. Best practices violations
-5. Language-specific concerns
-6. Architectural impact
-
-Always respond in valid JSON format with no markdown or code blocks."""
-
-        analysis_prompt = f"""Analyze the following code-related query with a security-first mindset:
-
-Query: {query}
-
-Provide a detailed analysis in JSON format with the following structure:
-
-{{
-    "error_type": "Specific error category or problem type",
-    "severity": "high|medium|low",
-    "security_impact": {{
-        "level": "critical|high|medium|low|none",
-        "vulnerabilities": ["List of potential security issues"],
-        "mitigations": ["Recommended security measures"]
-    }},
-    "search_terms": ["Key terms for finding relevant code"],
-    "file_types": ["Relevant file extensions"],
-    "language": "Primary programming language",
-    "frameworks": ["Relevant frameworks"],
-    "performance_impact": {{
-        "level": "high|medium|low|none",
-        "concerns": ["List of performance considerations"]
-    }},
-    "best_practices": {{
-        "violations": ["Potential violations of best practices"],
-        "recommendations": ["Recommended improvements"]
-    }},
-    "description": "Detailed problem description",
-    "metadata": {{
-        "complexity": "high|medium|low",
-        "scope": "security|performance|functionality|maintenance",
-        "priority": "high|medium|low"
-    }}
-}}
-
-Focus on security implications and best practices while maintaining high code quality standards."""
-        
-        try:
-            # Try each provider in sequence until one succeeds
-            for provider in self.llm_providers:
-                try:
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": analysis_prompt}
-                    ]
-                    content = asyncio.run(provider.generate_completion(messages, temperature=0.2))
-                    
-                    logger.debug("Raw analysis response: %s", content)
-                    
-                    try:
-                        analysis = json.loads(content)
-                        
-                        # Validate and ensure required fields
-                        required_fields = {
-                            'error_type': str,
-                            'severity': str,
-                            'security_impact': dict,
-                            'search_terms': list,
-                            'file_types': list,
-                            'language': str,
-                            'performance_impact': dict,
-                            'best_practices': dict,
-                            'description': str,
-                            'metadata': dict
-                        }
-                        
-                        # Initialize missing fields with default values
-                        for field, field_type in required_fields.items():
-                            if field not in analysis:
-                                if field_type == str:
-                                    analysis[field] = ""
-                                elif field_type == list:
-                                    analysis[field] = []
-                                elif field_type == dict:
-                                    analysis[field] = {}
-                        
-                        # Add quality score based on analysis completeness
-                        total_fields = len(required_fields)
-                        filled_fields = sum(1 for f in required_fields if analysis.get(f))
-                        analysis['quality_score'] = filled_fields / total_fields
-                        
-                        logger.info("Query analysis completed with quality score: %.2f", analysis['quality_score'])
-                        return analysis
-                        
-                    except json.JSONDecodeError as je:
-                        logger.error("JSON parsing error at position %d: %s", je.pos, je.msg)
-                        logger.error("Problematic content: %s", content[max(0, je.pos-50):min(len(content), je.pos+50)])
-                        continue
-                        
-                except Exception as e:
-                    logger.error(f"Error with provider {provider.__class__.__name__}: {str(e)}")
-                    continue
-            
-            # All providers failed
-            return {
-                "error_type": "provider_error",
-                "severity": "low",
-                "security_impact": {"level": "none", "vulnerabilities": [], "mitigations": []},
-                "search_terms": [query],
-                "file_types": [],
-                "language": "unknown",
-                "performance_impact": {"level": "none", "concerns": []},
-                "best_practices": {"violations": [], "recommendations": []},
-                "description": "All providers failed to analyze query",
-                "metadata": {"complexity": "low", "scope": "functionality", "priority": "low"},
-                "quality_score": 0.0
-            }
-            
-        except Exception as e:
-            logger.error("Error analyzing query: %s", str(e), exc_info=True)
-            return {
-                "error_type": "analysis_error",
-                "severity": "low",
-                "security_impact": {"level": "none", "vulnerabilities": [], "mitigations": []},
-                "search_terms": [query],
-                "file_types": [],
-                "language": "unknown",
-                "performance_impact": {"level": "none", "concerns": []},
-                "best_practices": {"violations": [], "recommendations": []},
-                "description": f"Error during analysis: {str(e)}",
-                "metadata": {"complexity": "low", "scope": "functionality", "priority": "low"},
-                "quality_score": 0.0
-            }
-
-    def _search_code(self, query: str, search_terms: List[str]) -> List[Dict[str, Any]]:
-        """Search for relevant code snippets in the vector database."""
-        try:
-            # 1. Get vector embedding for the query
-            embedding = self._get_embedding(query)
-            
-            # Log search parameters at INFO level
-            logger.info("Searching for code snippets - Query: '%s', Terms: %s", 
-                       query, ', '.join(search_terms))
-            
-            # 2. Perform the search using query_vector with lower threshold
-            search_results = self.qdrant_client.search(
+            # Search for similar vectors
+            results = self.qdrant_client.search(
                 collection_name=self.collection_name,
-                query_vector=embedding,
-                limit=10,  # Increased limit to get more candidates
-                with_payload=True,
-                with_vectors=False,
-                score_threshold=0.3  # Lowered threshold for more results
+                query_vector=query_embedding,
+                limit=5
             )
             
-            # Log initial results count
-            logger.info("Found %d initial results", len(search_results))
-            
-            # 3. Format and filter results with quality checks
-            code_snippets = []
-            for result in search_results:
-                # Skip invalid results
-                if not result.payload or 'content' not in result.payload:
-                    logger.debug("Skipping result with missing payload or content")
-                    continue
+            if not results:  # Check if results list is empty
+                return []
                 
-                content = result.payload.get('content', '').strip()
+            # Process and return results
+            processed_results = []
+            for match in results:  # Results is already a list of ScoredPoint objects
+                payload = match.payload
+                processed_results.append({
+                    'code': payload.get('code', ''),
+                    'file_path': payload.get('file_path', ''),
+                    'language': payload.get('language', 'unknown'),
+                    'similarity': match.score
+                })
                 
-                # Skip empty or very short content
-                if not content or len(content.split()) < 3:
-                    logger.debug("Skipping result with insufficient content: %s", 
-                               result.payload.get('file_path'))
-                    continue
-                
-                # Basic content quality check
-                if content.count('\n') < 2 and len(content) < 50:
-                    logger.debug("Skipping low quality content: %s", 
-                               result.payload.get('file_path'))
-                    continue
-                
-                snippet = {
-                    'file_path': result.payload.get('file_path', 'unknown'),
-                    'content': content,
-                    'language': result.payload.get('language', ''),
-                    'score': result.score,
-                    'type': result.payload.get('type', 'code_snippet'),
-                    'lines': content.count('\n') + 1,
-                    'chars': len(content)
-                }
-                code_snippets.append(snippet)
-            
-            # Sort by score but boost longer, more complete snippets
-            def snippet_score(s):
-                # Combine relevance score with content quality metrics
-                base_score = s['score']
-                length_boost = min(s['lines'] / 10, 1.0)  # Boost for longer snippets
-                return base_score * (1 + length_boost * 0.2)  # 20% max boost for length
-            
-            sorted_snippets = sorted(code_snippets, key=snippet_score, reverse=True)
-            
-            # Take top 5 after quality sorting
-            final_snippets = sorted_snippets[:5]
-            
-            logger.info("Returning %d quality code snippets (from %d candidates)", 
-                       len(final_snippets), len(code_snippets))
-            
-            # Log detailed snippet info at debug level
-            for idx, snippet in enumerate(final_snippets, 1):
-                logger.debug("Snippet %d: %s (score: %.3f, lines: %d)", 
-                           idx, snippet['file_path'], snippet['score'], snippet['lines'])
-            
-            return final_snippets
+            return processed_results
             
         except Exception as e:
-            logger.error("Error searching code: %s", str(e), exc_info=True)
-            return []  # Return empty list on error
-
-    def _get_embedding(self, text: str) -> List[float]:
-        """Get embedding for text, using Redis cache if available."""
+            logger.error(f"Error searching code: {str(e)}")
+            return []
+            
+    async def index_code(self, code: str, metadata: Dict) -> None:
+        """Index a code snippet with its embedding"""
         try:
-            # Create cache key using SHA-256
-            cache_key = f"embedding:{hashlib.sha256(text.encode()).hexdigest()}"
+            # Generate embedding for code
+            code_embedding = await self._get_embedding(code)
             
-            # Try to get from cache if Redis is available
-            if self.redis_client is not None:
-                try:
-                    cached = self.redis_client.get(cache_key)
-                    if cached:
-                        logger.debug("Cache hit for embedding")
-                        embedding = json.loads(cached)
-                        # Ensure cached embedding has correct dimension
-                        if len(embedding) != settings.embedding_dimension:
-                            logger.warning(f"Cached embedding has wrong dimension {len(embedding)}, clearing cache")
-                            self.redis_client.delete(cache_key)
-                        else:
-                            return embedding
-                    logger.debug("Cache miss for embedding")
-                except redis.RedisError as e:
-                    logger.warning(f"Redis error while getting embedding: {str(e)}")
-                    # Continue with provider call on Redis error
-            
-            # Get embedding from provider
-            for provider in self.llm_providers:
-                try:
-                    embedding = asyncio.run(provider.generate_embedding(text))
-                    
-                    # Verify embedding dimension
-                    if len(embedding) != settings.embedding_dimension:
-                        logger.error(f"Provider {provider.__class__.__name__} returned wrong embedding dimension: got {len(embedding)}, expected {settings.embedding_dimension}")
-                        continue
-                    
-                    # Cache the result if Redis is available
-                    if self.redis_client is not None:
-                        try:
-                            self.redis_client.setex(
-                                cache_key,
-                                timedelta(hours=24),
-                                json.dumps(embedding)
-                            )
-                        except redis.RedisError as e:
-                            logger.warning(f"Redis error while caching embedding: {str(e)}")
-                            # Continue even if caching fails
-                            
-                    return embedding
-                except Exception as e:
-                    logger.error(f"Error getting embedding from provider {provider.__class__.__name__}: {str(e)}")
-                    continue
-                    
-            # All providers failed, return zero vector of correct dimension
-            logger.error("All providers failed to generate embedding")
-            return [0.0] * settings.embedding_dimension
+            # Add document to vector store
+            self.qdrant_client.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    models.PointStruct(
+                        id=str(uuid.uuid4()),
+                        vector=code_embedding,
+                        payload={
+                            "code": code,
+                            "file_path": metadata.get('file_path', ''),
+                            "language": metadata.get('language', 'unknown'),
+                            **metadata
+                        }
+                    )
+                ]
+            )
             
         except Exception as e:
-            logger.error(f"Unexpected error in _get_embedding: {str(e)}")
-            return [0.0] * settings.embedding_dimension
+            logger.error(f"Error indexing code: {str(e)}")
+            raise
+
+    async def _get_embedding(self, text: str) -> List[float]:
+        """Get embedding for text using the configured provider"""
+        try:
+            return await self.generate_embedding(text)
+        except Exception as e:
+            logger.error(f"Error getting embedding: {str(e)}")
+            raise
 
     def _generate_code_fix(self, query: str, code_snippets: List[Dict[str, Any]], 
                           analysis: Dict[str, Any]) -> Dict[str, Any]:
@@ -886,19 +568,22 @@ Focus on security implications and best practices while maintaining high code qu
             return self._generate_error_response("No code snippets available for analysis")
             
         # Prepare context from code snippets (limit to most relevant)
-        relevant_snippets = sorted(code_snippets, key=lambda x: x.get('score', 0), reverse=True)[:2]
+        relevant_snippets = sorted(code_snippets, key=lambda x: x.get('similarity', 0), reverse=True)[:2]
         code_context = "\n\n".join([
-            f"File: {snippet.get('file_path', 'unknown')}\n```{snippet.get('language', '')}\n{snippet.get('content', '')}\n```"
+            f"File: {snippet.get('file_path', 'unknown')}\\n{snippet.get('code', '')}"
             for snippet in relevant_snippets
         ])
         
-        system_prompt = """You are an elite senior software architect and security expert. Your task is to analyze code and provide fixes in a specific JSON format.
+        system_prompt = """You are an expert code reviewer and fixer. Your task is to analyze code and provide fixes in a structured format.
 
-IMPORTANT: 
-1. Your response must be ONLY valid JSON, with no additional text or markdown
-2. All code in the response must be properly escaped for JSON
-3. All strings must use double quotes, not single quotes
-4. Ensure all code is syntactically correct before including it
+IMPORTANT RESPONSE RULES:
+1. Respond ONLY with a valid JSON object
+2. DO NOT use markdown formatting
+3. DO NOT use code blocks
+4. DO NOT include any explanatory text outside the JSON
+5. Ensure all strings are properly escaped
+6. Use double quotes for all keys and string values
+7. Use "\\n" for newlines in code
 
 Example response format:
 {
@@ -912,179 +597,193 @@ Example response format:
             "replacement": "new code",
             "explanation": "why changed"
         }
-    ],
-    "security_review": {
-        "vulnerabilities_fixed": ["list", "of", "fixes"],
-        "security_improvements": ["list", "of", "improvements"],
-        "risk_level": "high|medium|low"
-    }
+    ]
 }"""
 
-        fix_prompt = f"""Analyze and fix this code:
+        fix_prompt = f"""Review and suggest improvements for this code:
 
 Query: {query}
-Analysis: {json.dumps(analysis, indent=2)}
-Context: {code_context}
 
-Requirements:
-1. Response must be ONLY a JSON object
-2. All code must be properly escaped for JSON
-3. Use double quotes for strings
-4. Ensure all code is syntactically valid
-5. Include complete implementation
+Code Context:
+{code_context}
 
-Fields required in response:
-1. explanation: Brief explanation of changes
-2. fixed_code: Complete fixed code (properly escaped)
-3. file_path: Path to file being modified
-4. changes: Array of specific changes
-5. security_review: Security analysis object
-
-DO NOT include any text outside the JSON structure."""
+STRICT RESPONSE RULES:
+1. Return ONLY a JSON object
+2. NO markdown
+3. NO code blocks
+4. NO explanatory text
+5. Use the exact format from the system prompt
+6. Ensure all JSON is valid and properly escaped
+7. Use double quotes for all strings
+8. Use "\\n" for newlines in code
+9. Include specific line-by-line changes in the "changes" array"""
         
         try:
             # Try each provider in sequence until one succeeds
+            last_error = None
             for provider in self.llm_providers:
                 try:
                     messages = [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": fix_prompt}
                     ]
+                    
+                    logger.debug(f"Trying code fix generation with provider: {provider.__class__.__name__}")
                     content = asyncio.run(provider.generate_completion(messages, temperature=0.2))
                     
-                    logger.debug("Raw code fix response: %s", content)
-                    
-                    try:
-                        # Clean and validate the response
-                        content = self._clean_json_response(content)
-                        
-                        # Parse the cleaned JSON
-                        code_fix = json.loads(content)
-                        
-                        # Validate and fix the code fix
-                        code_fix = self._validate_and_fix_response(code_fix)
-                        
-                        logger.info("Generated code fix with quality score: %.2f", code_fix.get('quality_score', 0))
-                        return code_fix
-                        
-                    except json.JSONDecodeError as je:
-                        logger.error("JSON parsing error in code fix at position %d: %s", je.pos, je.msg)
-                        logger.debug("Problematic content: %s", content[max(0, je.pos-50):min(len(content), je.pos+50)])
+                    # Clean and validate the response
+                    cleaned_content = self._clean_json_response(content)
+                    if not cleaned_content:
+                        logger.warning(f"Provider {provider.__class__.__name__} returned empty response")
                         continue
+                        
+                    try:
+                        code_fix = json.loads(cleaned_content)
+                    except json.JSONDecodeError as je:
+                        logger.error(f"JSON parsing error with {provider.__class__.__name__}: {str(je)}")
+                        logger.debug(f"Problematic content: {cleaned_content[:200]}...")
+                        last_error = je
+                        continue
+                        
+                    # Validate and fix the response
+                    code_fix = self._validate_and_fix_response(code_fix)
+                    
+                    # Check if code is syntactically valid
+                    if code_fix.get('fixed_code'):
+                        try:
+                            compile(code_fix['fixed_code'], '<string>', 'exec')
+                        except SyntaxError as se:
+                            logger.warning(f"Syntax error in generated code: {str(se)}")
+                            code_fix['syntax_check'] = {'status': 'failed', 'error': str(se)}
+                        else:
+                            code_fix['syntax_check'] = {'status': 'passed'}
+                            
+                    logger.info(f"Successfully generated code fix with {provider.__class__.__name__}")
+                    return code_fix
+                    
                 except Exception as e:
                     logger.error(f"Error with provider {provider.__class__.__name__}: {str(e)}")
+                    last_error = e
                     continue
             
             # All providers failed
-            return self._generate_error_response("All providers failed to generate code fix")
+            error_msg = f"All providers failed to generate code fix. Last error: {str(last_error)}"
+            logger.error(error_msg)
+            return self._generate_error_response(error_msg)
             
         except Exception as e:
-            logger.error("Error generating code fix: %s", str(e), exc_info=True)
-            return self._generate_error_response(f"Error generating code fix: {str(e)}")
+            error_msg = f"Unexpected error generating code fix: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return self._generate_error_response(error_msg)
 
-    def _clean_json_response(self, content: str) -> str:
+    def _clean_json_response(self, response: str) -> str:
         """Clean and prepare the response for JSON parsing."""
-        # Remove any markdown code blocks
-        content = content.replace("```json", "").replace("```", "")
-        
-        # Remove any leading/trailing whitespace
-        content = content.strip()
-        
-        # Remove any non-JSON content before the first { or after the last }
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start >= 0 and end > start:
-            content = content[start:end]
+        if not response:
+            logger.error("Empty response received")
+            return "{}"
             
-        # Replace any single quotes with double quotes (only outside of code blocks)
-        in_code = False
-        cleaned = []
-        for char in content:
-            if char == '`':
-                in_code = not in_code
-            elif char == "'" and not in_code:
-                char = '"'
-            cleaned.append(char)
-        content = ''.join(cleaned)
-        
-        return content
+        try:
+            # First try to find JSON content within code blocks
+            code_block_pattern = r"```(?:json)?\s*(.*?)```"
+            matches = re.findall(code_block_pattern, response, re.DOTALL)
+            
+            if matches:
+                # Try each code block until we find valid JSON
+                for block in matches:
+                    try:
+                        cleaned = block.strip()
+                        json.loads(cleaned)  # Validate JSON
+                        return cleaned
+                    except json.JSONDecodeError:
+                        continue
+            
+            # If no valid JSON in code blocks, try to extract JSON from the raw response
+            # Find the outermost JSON object
+            json_pattern = r"\{(?:[^{}]|(?R))*\}"
+            matches = re.findall(json_pattern, response, re.DOTALL)
+            
+            if matches:
+                for potential_json in matches:
+                    try:
+                        cleaned = potential_json.strip()
+                        json.loads(cleaned)  # Validate JSON
+                        return cleaned
+                    except json.JSONDecodeError:
+                        continue
+            
+            # If still no valid JSON, try to clean up the response
+            response = response.strip()
+            start = response.find('{')
+            end = response.rfind('}')
+            
+            if start != -1 and end != -1:
+                response = response[start:end + 1]
+                # Clean up common issues
+                response = re.sub(r'\\n', r'\\\\n', response)  # Fix newline escaping
+                response = re.sub(r'(?<!\\)"', r'\"', response)  # Escape unescaped quotes
+                response = re.sub(r',(\s*})', r'\1', response)  # Remove trailing commas
+                
+                try:
+                    json.loads(response)  # Validate final JSON
+                    return response
+                except json.JSONDecodeError:
+                    pass
+            
+            logger.error("Could not extract valid JSON from response")
+            return "{}"
+            
+        except Exception as e:
+            logger.error(f"Error cleaning JSON response: {str(e)}")
+            return "{}"
 
     def _validate_and_fix_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate and fix the response structure."""
-        # Required fields with their default values
-        required_fields = {
-            'explanation': '',
-            'fixed_code': '',
-            'file_path': '',
-            'changes': [],
-            'security_review': {
-                'vulnerabilities_fixed': [],
-                'security_improvements': [],
-                'risk_level': 'unknown'
-            },
-            'quality_metrics': {
-                'maintainability': 'unknown',
-                'complexity': 'unknown',
-                'test_coverage_impact': 'unknown'
-            }
-        }
+        """Validate and fix the response structure, ensuring all required fields are present."""
+        if not isinstance(response, dict):
+            logger.error("Response is not a dictionary")
+            return self._generate_error_response("Invalid response format")
+            
+        # Required fields
+        required_fields = ['explanation', 'fixed_code', 'file_path', 'changes']
         
-        # Ensure all required fields exist
-        for field, default in required_fields.items():
+        # Check and set defaults for missing fields
+        for field in required_fields:
             if field not in response:
-                response[field] = default
-            elif isinstance(default, dict) and isinstance(response[field], dict):
-                # Ensure nested fields exist
-                for nested_field, nested_default in default.items():
-                    if nested_field not in response[field]:
-                        response[field][nested_field] = nested_default
+                logger.warning(f"Missing required field: {field}")
+                response[field] = "" if field in ['explanation', 'fixed_code', 'file_path'] else []
+                
+        # Ensure changes is a list
+        if not isinstance(response['changes'], list):
+            logger.warning("Changes field is not a list")
+            response['changes'] = []
+            
+        # Calculate quality score based on field completeness
+        filled_fields = sum(1 for field in required_fields if response.get(field))
+        response['quality_score'] = filled_fields / len(required_fields)
         
-        # Validate code syntax if possible
-        if response['fixed_code']:
-            try:
-                compile(response['fixed_code'], '<string>', 'exec')
-            except SyntaxError as e:
-                logger.warning(f"Syntax error in generated code: {str(e)}")
-                response['syntax_check'] = {
-                    'status': 'failed',
-                    'error': str(e)
-                }
-            else:
-                response['syntax_check'] = {
-                    'status': 'passed'
-                }
-        
-        # Calculate quality score
-        total_fields = len(required_fields)
-        filled_fields = sum(1 for f in required_fields if response.get(f))
-        response['quality_score'] = filled_fields / total_fields
+        # Add metadata
+        response['metadata'] = {
+            'timestamp': datetime.now().isoformat(),
+            'provider': self.llm_providers[0].__class__.__name__ if self.llm_providers else 'unknown'
+        }
         
         return response
 
     def _generate_error_response(self, error_message: str) -> Dict[str, Any]:
-        """Generate a standardized error response for code fix failures."""
+        """Generate a standardized error response."""
         return {
-            "explanation": error_message,
-            "fixed_code": "",
-            "file_path": "",
-            "changes": [],
-            "security_review": {
-                "vulnerabilities_fixed": [],
-                "security_improvements": [],
-                "risk_level": "unknown"
+            'explanation': f"Error: {error_message}",
+            'fixed_code': '',
+            'file_path': '',
+            'changes': [],
+            'error': {
+                'message': error_message,
+                'timestamp': datetime.now().isoformat()
             },
-            "quality_metrics": {
-                "maintainability": "unknown",
-                "complexity": "unknown",
-                "test_coverage_impact": "unknown"
-            },
-            "performance_impact": {
-                "description": "Unable to analyze performance impact",
-                "recommendations": []
-            },
-            "testing_recommendations": [],
-            "documentation_updates": [],
-            "quality_score": 0.0
+            'quality_score': 0.0,
+            'metadata': {
+                'status': 'error',
+                'provider': self.llm_providers[0].__class__.__name__ if self.llm_providers else 'unknown'
+            }
         }
 
     def _save_interaction(self, query: str, code_snippets: List[Dict[str, Any]], 
@@ -1132,12 +831,6 @@ DO NOT include any text outside the JSON structure."""
 
     async def store_code(self, file_path: str, content: str, language: str, clear_existing: bool = True) -> Dict[str, Any]:
         """Store code in the vector database for future searches."""
-        return await asyncio.get_event_loop().run_in_executor(
-            self.executor, self._store_code_sync, file_path, content, language, clear_existing
-        )
-
-    def _store_code_sync(self, file_path: str, content: str, language: str, clear_existing: bool = True) -> Dict[str, Any]:
-        """Synchronous implementation of code storage."""
         try:
             # Clear existing collection if requested
             if clear_existing:
@@ -1145,7 +838,7 @@ DO NOT include any text outside the JSON structure."""
                 self._ensure_collection_exists()
             
             # Get embedding for the code content
-            embedding = self._get_embedding(content)
+            embedding = await self._get_embedding(content)
             
             # Generate a UUID for the point
             point_id = str(uuid.uuid4())
@@ -1158,7 +851,7 @@ DO NOT include any text outside the JSON structure."""
                         vector=embedding,
                         payload={
                             "file_path": file_path,
-                            "content": content,
+                            "code": content,
                             "language": language,
                             "type": "code_snippet"
                         }
@@ -1195,4 +888,226 @@ DO NOT include any text outside the JSON structure."""
                     "status": "error"
                 },
                 "mcp_context": context
+            }
+
+    async def process_query(self, query: str) -> Dict:
+        """Process a user query to return relevant code snippets with explanations"""
+        try:
+            # Search for relevant code snippets
+            search_results = await self.search_code(query)
+            
+            if not search_results:
+                return {
+                    "status": "success",
+                    "message": "No relevant code snippets found",
+                    "results": []
+                }
+            
+            # Generate explanations for each result
+            processed_results = []
+            for result in search_results:
+                # Generate explanation for the code
+                explanation = await self.explain_code(result['code'], result['language'])
+                
+                processed_results.append({
+                    "score": result['similarity'],
+                    "file_path": result['file_path'],
+                    "code": result['code'],
+                    "language": result['language'],
+                    "explanation": explanation
+                })
+            
+            return {
+                "status": "success",
+                "message": f"Found {len(processed_results)} relevant code snippets",
+                "results": processed_results
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing query: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error processing query: {str(e)}",
+                "results": []
+            }
+
+    async def generate_code_fix(self, query: str, code_snippets: List[Dict[str, Any]], error_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Generate a code fix based on the query, relevant code snippets, and optional error info"""
+        try:
+            # Add line numbers to code snippets
+            snippets_with_lines = []
+            for snippet in code_snippets:
+                code_lines = snippet['code'].split('\n')
+                snippets_with_lines.append({
+                    'code': snippet['code'],
+                    'file_path': snippet['file_path'],
+                    'language': snippet['language'],
+                    'start_line': 1,
+                    'end_line': len(code_lines),
+                    'similarity': snippet.get('similarity', 0)
+                })
+            
+            # Prepare context from code snippets
+            context = "\n\n".join([
+                f"Code snippet {i+1}:\n{snippet['code']}\nFile: {snippet['file_path']}\nLines: {snippet['start_line']}-{snippet['end_line']}"
+                for i, snippet in enumerate(snippets_with_lines)
+            ])
+            
+            # Prepare error context if available
+            error_context = ""
+            if error_info:
+                error_context = f"\nError message: {error_info.get('message', '')}\nError type: {error_info.get('type', '')}\nStack trace: {error_info.get('stack_trace', '')}"
+            
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are an expert code assistant. Analyze the code snippets and error information, then suggest a fix that addresses the user's query."
+                },
+                {
+                    "role": "user",
+                    "content": f"Query: {query}\n\nRelevant code:\n{context}{error_context}\n\nPlease suggest a code fix that addresses the query and any errors."
+                }
+            ]
+            
+            fix_suggestion = await self.generate_completion(messages)
+            
+            return {
+                "status": "success",
+                "explanation": fix_suggestion,
+                "code_snippets": snippets_with_lines
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating code fix: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error generating code fix: {str(e)}"
+            }
+            
+    async def analyze_code(self, code: str) -> str:
+        """Analyze code snippets and provide insights"""
+        try:
+            # Construct message for code analysis
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are an expert code analyst. Analyze the provided code snippets and provide insights about their functionality, patterns, and potential improvements."
+                },
+                {
+                    "role": "user", 
+                    "content": f"Please analyze the following code and provide insights:\n\n{code}"
+                }
+            ]
+            
+            # Generate analysis using LLM
+            response = await self.provider.generate_completion(messages)
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error analyzing code: {str(e)}")
+            return "Error occurred while analyzing the code."
+
+    async def generate_test(self, code: str, test_type: str = "unit") -> Dict[str, Any]:
+        """Generate test cases for the given code"""
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": f"You are an expert in {test_type} testing. Generate comprehensive test cases for the provided code."
+                },
+                {
+                    "role": "user",
+                    "content": f"Please generate {test_type} tests for this code:\n\n{code}\n\nInclude:\n1. Test cases covering main functionality\n2. Edge cases and error conditions\n3. Clear test descriptions and assertions"
+                }
+            ]
+            
+            test_code = await self.generate_completion(messages)
+            
+            return {
+                "status": "success",
+                "test_code": test_code
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating test: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error generating test: {str(e)}"
+            }
+            
+    async def explain_code(self, code: str, language: str) -> str:
+        """Generate an explanation for a code snippet"""
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are an expert code assistant. Analyze the code snippet and provide a clear, concise explanation."
+                },
+                {
+                    "role": "user",
+                    "content": f"Please explain this {language} code snippet:\n\n{code}"
+                }
+            ]
+            
+            explanation = await self.generate_completion(messages)
+            return explanation
+            
+        except Exception as e:
+            logger.error(f"Error generating explanation: {str(e)}")
+            return "Error generating explanation"
+
+    def _delete_collection(self):
+        """Delete the existing collection if it exists"""
+        try:
+            collections = self.qdrant_client.get_collections().collections
+            if any(c.name == self.collection_name for c in collections):
+                self.qdrant_client.delete_collection(collection_name=self.collection_name)
+                logger.info(f"Deleted collection: {self.collection_name}")
+        except Exception as e:
+            logger.error(f"Error deleting collection: {str(e)}")
+            raise
+
+    async def run(self, query: str) -> Dict[str, Any]:
+        """Run the agent with a query and return results"""
+        try:
+            # Search for relevant code snippets
+            code_snippets = await self.search_code(query)
+            
+            if not code_snippets:
+                return {
+                    "status": "success",
+                    "message": "No relevant code snippets found",
+                    "code_snippets": [],
+                    "analysis": "No code snippets to analyze",
+                    "code_fix": {"explanation": "No code to fix"}
+                }
+            
+            # Analyze the code snippets
+            code_text = "\n\n".join([
+                f"File: {snippet['file_path']}\n{snippet['code']}"
+                for snippet in code_snippets
+            ])
+            
+            # Get analysis as string
+            analysis = await self.analyze_code(code_text)
+            
+            # Generate code fix suggestions
+            code_fix = await self.generate_code_fix(query, code_snippets)
+            
+            return {
+                "status": "success",
+                "message": "Analysis completed successfully",
+                "code_snippets": code_snippets,
+                "analysis": analysis,  # Now correctly handling string result
+                "code_fix": code_fix
+            }
+            
+        except Exception as e:
+            logger.error(f"Error running agent: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error running agent: {str(e)}",
+                "code_snippets": [],
+                "analysis": f"Error occurred: {str(e)}",
+                "code_fix": {"status": "error", "message": str(e)}
             } 
