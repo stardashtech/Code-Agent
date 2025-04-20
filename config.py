@@ -6,7 +6,7 @@ if not OPENAI_API_KEY:
     raise ValueError("Please define the OPENAI_API_KEY environment variable.")
 
 # LLM ChatCompletion Model
-LLM_MODEL = "gpt-4"
+LLM_MODEL = "gemma3:4b"  # Updated to use Gemma
 LLM_TEMPERATURE = 0.2
 LLM_MAX_TOKENS = 1024
 PROMPT_SAFETY_DIRECTIVE = (
@@ -15,8 +15,8 @@ PROMPT_SAFETY_DIRECTIVE = (
 )
 
 # Embedding Model
-EMBEDDING_MODEL = "text-embedding-ada-002"
-EMBEDDING_DIMENSION = 1536  # for "ada-002"
+EMBEDDING_MODEL = "nomic-embed-text"  # Updated to use nomic-embed-text
+EMBEDDING_DIMENSION = 1024  # Matches nomic-embed-text dimension
 
 # Code execution settings
 CODE_EXECUTION_TIMEOUT = 5  # seconds
@@ -33,6 +33,12 @@ MEILISEARCH_INDEX = "agent_logs"
 
 # Chunking settings
 CHUNK_SIZE = 500  # Character limit per chunk
+
+# Redis Settings
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+REDIS_CACHE_TTL = int(os.getenv("REDIS_CACHE_TTL", "86400"))  # 24 hours in seconds
 
 # Chain-of-thought logging (hidden reflection)
 ENABLE_CHAIN_OF_THOUGHT_LOGGING = True 
