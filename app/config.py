@@ -3,6 +3,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from dataclasses import dataclass
 from pydantic_settings import BaseSettings
+from urllib.parse import urlparse
 
 # Load environment variables from .env file
 load_dotenv()
@@ -87,6 +88,23 @@ class Settings(BaseSettings):
     enable_response_cache: bool = True
     enable_embedding_cache: bool = True
     enable_search_cache: bool = True
+    
+    @property
+    def redis_host(self) -> str:
+        """Extract host from redis_url"""
+        parsed = urlparse(self.redis_url)
+        return parsed.hostname or "localhost"
+    
+    @property
+    def redis_port(self) -> int:
+        """Extract port from redis_url"""
+        parsed = urlparse(self.redis_url)
+        return parsed.port or 6379
+    
+    @property
+    def cache_ttl(self) -> int:
+        """Alias for redis_cache_ttl"""
+        return self.redis_cache_ttl
     
     class Config:
         env_file = ".env"
