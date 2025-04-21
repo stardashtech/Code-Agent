@@ -1,192 +1,139 @@
-# Code Agent Architecture
+# Code Agent: Your AI Pair Programmer 🚀
 
-## Overview
-This project implements a sophisticated, production-ready intelligent agent architecture designed for complex code understanding, analysis, modification, and validation tasks. The system employs a modular design, integrating various AI techniques and external tools into an extensible framework.
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://example.com/build)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Open Issues](https://img.shields.io/github/issues/your-username/your-repo)](https://github.com/your-username/your-repo/issues)
+[![Stars](https://img.shields.io/github/stars/your-username/your-repo?style=social)](https://github.com/your-username/your-repo)
 
-## Key Features
-- **Advanced LLM Integration**: Leverages Large Language Models (e.g., GPT-4, Ollama, vLLM) for core reasoning, analysis, and code generation tasks.
-- **Reflection & Planning**: Incorporates `Reflector` (for query clarity assessment, keyword extraction, decomposition) and `Planner` (for dynamic step generation) agents to guide execution.
-- **Vector Database Integration**: Utilizes Qdrant via `VectorStoreManager` for efficient semantic search of code snippets and storage of interaction history.
-- **Docker-based Code Execution Sandbox**: Executes and validates generated code safely within isolated Docker containers using `DockerSandboxRunner`.
-- **Extensible Tool Integration**: Designed to easily incorporate external tools:
-    - Currently integrated (simulated or basic): Web Search, GitHub Code Search, Stack Overflow Search.
-    - Example potential tools: File System interaction (Apply Fix), etc.
-- **Modular Architecture**: Core logic is being refactored into focused components like `PlanExecutor` for better maintainability and testability.
-- **Caching**: Redis integration for caching LLM embeddings to improve performance and reduce costs.
-- **Asynchronous Operations**: Built with `asyncio` for efficient handling of I/O-bound tasks (LLM calls, tool interactions).
-- **Configuration Management**: Uses a `Config` class and potentially external settings (e.g., via `python-dotenv`) for flexible setup.
+**Code Agent is a cutting-edge, AI-powered assistant designed to revolutionize how you interact with your codebase. It understands your needs, analyzes code semantically, suggests intelligent improvements, and can even automate modifications, acting like an experienced pair programmer.**
 
-## Architecture Components
-- **`CodeAgent`**: The central orchestrator managing the workflow from query intake to final response.
-- **LLM Providers (`OpenAIProvider`, `OllamaProvider`, etc.)**: Abstract interactions with different LLM APIs.
-- **`Reflector`**: Analyzes the input query for clarity, keywords, and decomposition.
-- **`Planner`**: Generates a sequence of steps (plan) to address the query based on reflection outputs.
-- **`PlanExecutor`**: Executes the generated plan step-by-step, invoking necessary tools and agent methods.
-- **`VectorStoreManager`**: Handles interactions with the Qdrant vector database for storing and retrieving code and interactions.
-- **Search Providers (`GitHubSearchProvider`, `StackOverflowSearchProvider`)**: Interfaces for searching external code repositories (currently basic implementations).
-- **Sandbox Runner (`DockerSandboxRunner`)**: Executes code securely in an isolated environment.
-- **Configuration (`Config`, `settings`)**: Manages API keys, model names, and service endpoints.
-- **(Potential Future Components)**: Tool Manager, Output Formatter, etc.
+Leveraging the power of Large Language Models (LLMs) and advanced techniques like semantic search and dynamic planning, Code Agent goes beyond simple syntax checking to provide deep insights and actionable suggestions. Whether you're trying to understand complex logic, add new features, refactor existing code, or identify potential bugs, Code Agent is here to accelerate your development workflow.
 
-## Workflow
-1.  **Query Input**: User provides a query.
-2.  **Reflection**: `Reflector` assesses clarity, extracts keywords, and decomposes the query.
-3.  **Planning**: `Planner` creates an execution plan (e.g., search code, analyze, generate fix, validate).
-4.  **Execution**: `PlanExecutor` iterates through the plan:
-    - Executes search steps using `VectorStoreManager` or external providers.
-    - Calls `CodeAgent.analyze_code` to interpret results.
-    - Calls `CodeAgent._generate_code_fix` if a fix is needed.
-    - Calls `CodeAgent.sandbox_runner.run_code` to validate the fix.
-    - (Simulates) calls `edit_file` tool if applying the fix.
-5.  **Response Generation**: Results (analysis, code snippets, fix details, validation status) are compiled.
-6.  **Post-Processing**: Interaction details are saved to the vector store.
+## ✨ Why Choose Code Agent?
 
-## Installation
+*   **Intelligent Code Comprehension:** Moves beyond keyword matching to truly *understand* the intent behind your queries and the logic within your code.
+*   **Accelerated Development:** Automates tedious tasks like finding relevant code sections, generating boilerplate, and applying refactoring patterns.
+*   **Enhanced Code Quality:** Proactively suggests improvements, identifies potential issues, and helps maintain consistency across your codebase.
+*   **Dynamic & Adaptive:** Doesn't rely on fixed rules; it uses reflection and dynamic planning to tailor its approach to *your specific* query and codebase context.
+*   **Safe & Secure:** Includes an optional Docker-based sandbox for validating code changes in an isolated environment before applying them.
+*   **Extensible Architecture:** Built with modularity in mind, ready for future integrations and tool additions.
+
+## 🔥 Features
+
+*   **Natural Language Interface:** Converse with the agent using plain English.
+*   **Deep Semantic Search:** Pinpoints relevant code snippets across your project using vector embeddings (Qdrant), even if you don't know the exact function or variable names.
+*   **LLM-Powered Analysis:** Utilizes state-of-the-art LLMs (like GPT via OpenAI) for sophisticated code analysis, explanation, and reasoning.
+*   **Automated Code Generation & Modification:** Generates code patches, new functions, or refactoring suggestions based on your requests.
+*   **Reflection & Dynamic Planning:** Intelligently assesses query clarity and dynamically creates multi-step plans to tackle complex tasks.
+*   **Optional Sandbox Validation:** Safely test generated code within a Docker container to catch errors before they hit your main codebase. (Requires Docker)
+*   **Automated File Backup:** Automatically creates backups before modifying any files, ensuring you can always revert changes.
+*   **Configurable & Modular:** Easily configure API keys, model preferences, and other settings.
+
+## 🏗️ Architecture & Components
+
+Code Agent employs a sophisticated, modular architecture:
+
+| Component                 | Location                                  | Role                                                                                                |
+| :------------------------ | :---------------------------------------- | :-------------------------------------------------------------------------------------------------- |
+| **Code Agent Service**    | `app/services/code_agent.py`              | Main orchestrator, manages the end-to-end workflow and coordinates components.                      |
+| **Reflection Engine**     | `agent/reflection.py`, `app/agents/*`     | Assesses query clarity, extracts keywords, decomposes tasks, informs planning.                        |
+| **Dynamic Planner**       | `app/agents/planner.py`                   | Generates context-aware, multi-step execution plans using LLMs.                                     |
+| **Plan Executor**         | `app/services/plan_executor.py`           | Executes the plan step-by-step, managing state and invoking tools/LLMs.                             |
+| **Vector Store Manager**  | `app/services/vector_store_manager.py`    | Interfaces with Qdrant for storing code embeddings and performing lightning-fast semantic searches. |
+| **LLM Interface**         | `models/llm.py`                           | Standardized interface for interacting with various LLM providers (e.g., OpenAI).                   |
+| **Docker Sandbox Runner** | `app/services/docker_runner.py`           | (Optional) Provides a secure Docker environment for code validation and execution.                  |
+| **Configuration**         | `config.py`                               | Manages application settings, API keys, and service endpoints.                                      |
+| **Logging Service**       | `agent/logger.py`                         | Provides structured logging throughout the agent's operation.                                       |
+
+## ⚙️ Workflow Explained
+
+The agent processes queries through a structured, intelligent workflow:
+
+1.  **Initialization:** Sets up connections (LLM, Vector Store) and attempts Docker runner initialization. Indexes code if necessary.
+2.  **Query Intake:** Receives the user's request in natural language.
+3.  **Reflection:** The query is analyzed for clarity and complexity. Keywords are extracted. If ambiguous, the agent asks for clarification.
+4.  **Planning:** A dynamic plan is generated by the LLM, outlining the steps needed (e.g., search, analyze, generate, validate, apply).
+5.  **Execution:** The `PlanExecutor` carries out the plan:
+    *   *Search:* Finds relevant code via the `VectorStoreManager`.
+    *   *Analyze:* Uses the LLM to understand the code in the context of the query.
+    *   *Generate Fix:* Instructs the LLM to create the necessary code changes.
+    *   *Validate:* (If Docker is enabled) Executes the fix in the sandbox.
+    *   *Apply:* Backs up the original file and applies the validated changes.
+6.  **Finalization:** Compiles the results, status, summaries, and any generated artifacts.
+7.  **Output:** Presents the comprehensive result to the user.
+
+## 🚀 Getting Started
 
 ### Prerequisites
-- Python 3.9+
-- Docker Engine (if using `DockerSandboxRunner`)
-- Access to a Qdrant instance
-- Access to a Redis instance (for caching)
-- API keys for any desired LLM providers (e.g., OpenAI, OpenRouter)
 
-### Setup
-```bash
-# 1. Clone the repository
-git clone <repository-url>
-cd code-agent
+*   Python 3.9+
+*   Docker Engine & Docker Compose (Recommended, required for sandbox validation)
+*   Access to a Qdrant vector database instance.
+*   An API key for your chosen LLM provider (e.g., OpenAI).
 
-# 2. Create and activate a virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+### Setup Instructions
 
-# 3. Install dependencies
-pip install -r requirements.txt
-# Ensure you have the 'docker' library installed if using the sandbox:
-# pip install docker
+1.  **Clone the Magic:**
+    ```bash
+    git clone <your-repository-url>
+    cd <repository-directory>
+    ```
+2.  **Prepare Your Environment:**
+    ```bash
+    python3 -m venv venv
+    source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+    pip install -r requirements.txt
+    ```
+    *(Ensure `requirements.txt` is up-to-date)*
+3.  **Launch Qdrant:**
+    *   The easiest way is often Docker:
+        ```bash
+        docker run -p 6333:6333 qdrant/qdrant
+        ```
+    *   Verify connection details in your agent's configuration.
+4.  **Ensure Docker Daemon is Running:**
+    *   Required for the code validation sandbox feature.
+5.  **Configure API Keys:**
+    *   Set the `OPENAI_API_KEY` (or other provider keys) as an environment variable OR update `config.py`.
+    *   **Important:** Never commit API keys directly to your repository! Use environment variables or a `.env` file (add `.env` to your `.gitignore`).
 
-# 4. Configure environment variables
-# Create a .env file (copy from .env.example if provided)
-# and add your API keys and service endpoints:
-# OPENAI_API_KEY=sk-...
-# QDRANT_URL=http://localhost:6333
-# REDIS_HOST=localhost
-# REDIS_PORT=6379
-# OLLAMA_BASE_URL=http://localhost:11434 # If using Ollama
-# ... other settings ...
-```
+### Running the Agent
 
-## Running the Demo
-Ensure your external services (Qdrant, Redis, Docker daemon) are running.
-
-```bash
-python demo.py
-```
-This script initializes the `CodeAgent`, stores sample code in Qdrant, and runs several test queries through the agent's workflow, logging the output.
-
-## Testing
-Tests are implemented using `pytest`. Ensure development dependencies are installed.
+Execute the main entry point:
 
 ```bash
-# Install test dependencies (if separated in requirements-dev.txt)
-# pip install -r requirements-dev.txt
-
-# Run tests
-pytest
+python main.py  # Or the relevant script for your setup
 ```
 
-## Future Enhancements (Tracking in `improvements-tasks.json`)
-- Implement actual tool calls for external searches and file editing (replace simulations).
-- Add more comprehensive tests, especially for `PlanExecutor` and integration scenarios.
-- Further refactor `CodeAgent` into more specialized components.
-- Enhance error handling and reporting.
-- Implement more sophisticated RAG strategies.
-- Develop a proper API interface (e.g., using FastAPI).
+Interact with the agent through its interface or command-line prompts.
 
-## Project Structure
+## ⚠️ Known Issues
 
-```
-.
-├── app/                 # FastAPI application
-│   ├── __init__.py
-│   ├── main.py          # Main FastAPI application
-│   ├── config.py        # Configuration with Pydantic
-│   ├── schemas.py       # Request/Response models
-│   ├── api/             # API endpoints
-│   │   └── agent.py     # Agent API routes
-│   └── services/        # Business logic
-│       └── code_agent.py # Agent service wrapper
-├── agent/               # Core agent implementation
-│   ├── __init__.py
-│   ├── agent.py         # Main agent implementation
-│   ├── logger.py        # Logging with MeiliSearch
-│   ├── memory.py        # Short and long-term memory
-│   ├── orchestrator.py  # Tool orchestration
-│   ├── planner.py       # Planning and replanning
-│   ├── reflection.py    # Self-reflection
-│   └── subgoals.py      # Subgoal management
-├── models/              # ML models
-│   ├── __init__.py
-│   ├── embeddings.py    # Vector embeddings
-│   └── llm.py           # LLM integration
-├── tools/               # Agent tools
-│   ├── __init__.py
-│   ├── code_executor.py # Docker code execution
-│   ├── doc_analysis.py  # Document analysis
-│   ├── image_analysis.py# OCR image analysis
-│   ├── knowledge_graph.py # Neo4j integration
-│   ├── rag_retrieval.py # RAG implementation
-│   ├── vector_search.py # Qdrant vector search
-│   └── web_browser.py   # Web search
-├── tests/               # Unit tests
-├── logs/                # Application logs
-├── data/                # Persistent data
-├── Dockerfile           # Container definition
-├── docker-compose.yml   # Service orchestration
-├── prometheus.yml       # Prometheus configuration
-├── requirements.txt     # Python dependencies
-├── run.sh               # Run script
-└── README.md            # Documentation
-```
+*   **Docker Sandbox Runner Initialization:** The agent gracefully handles cases where Docker isn't running or accessible by skipping the optional "Validate Code (Sandbox)" step. To enable validation, ensure Docker is installed and the daemon is active. Look for errors like `docker.errors.DockerException: Error while fetching server API version...` in the logs if you encounter issues.
 
-## Features
+## 🤝 Contributing
 
-### FastAPI Integration
+We welcome contributions to make Code Agent even more powerful! Whether it's bug fixes, feature enhancements, documentation improvements, or new tool integrations, please feel free to:
 
-The system exposes its capabilities through a RESTful API powered by FastAPI, providing:
+1.  Fork the repository.
+2.  Create a new branch (`git checkout -b feature/YourAmazingFeature`).
+3.  Make your changes.
+4.  Commit your changes (`git commit -m 'Add some AmazingFeature'`).
+5.  Push to the branch (`git push origin feature/YourAmazingFeature`).
+6.  Open a Pull Request.
 
-- High-performance async endpoints
-- Automatic OpenAPI documentation
-- Request validation with Pydantic
-- Proper error handling and logging
-- Authentication (can be enabled as needed)
+Please ensure your code adheres to existing style guidelines and includes tests where appropriate.
 
-### Model Context Protocol (MCP)
+## 📄 License
 
-Support for the Model Context Protocol allows for more advanced interactions with language models:
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details (assuming you add an MIT license file).
 
-- Context persistence between requests
-- Enhanced context management
-- Tool integrations
-- Chain-of-thought preservation
+## 💬 Community & Support
 
-### Production Readiness
+*   **Issues:** Report bugs or suggest features via [GitHub Issues](https://github.com/your-username/your-repo/issues).
+*   **Discussions:** Join the conversation on [GitHub Discussions](https://github.com/your-username/your-repo/discussions) (if enabled).
+*   **(Optional):** Add links to Discord, Slack, mailing lists, etc.
 
-The system includes several features that make it production-ready:
+---
 
-- Comprehensive logging
-- Performance monitoring with Prometheus/Grafana
-- Graceful error handling
-- Health checks for Kubernetes integration
-- Rate limiting and security features
-- Docker containerization
-
-### Scalability
-
-The architecture is designed for scalability:
-
-- Stateless API design
-- Separate data persistence layers
-- Asynchronous processing
-- Worker pool management
-- Service-oriented architecture 
+Let's build the future of coding together with Code Agent! ✨ 
