@@ -31,18 +31,26 @@ class Reflector:
         """
         system_prompt = (
             "You are an expert assistant analyzing user queries related to code. "
-            "Your goal is to determine if a query is ambiguous or lacks sufficient detail "
-            "for a code generation or search task. Consider the conversation history if provided. "
-            "If it is ambiguous, formulate a single, specific question to ask the user for clarification. "
-            "If the query is clear enough (potentially clarified by history), respond ONLY with the word 'CLEAR'."
+            "Your goal is to determine if the user's LATEST query is ambiguous or lacks sufficient detail "
+            "to proceed with tasks like code search, analysis, or generation, CONSIDERING the provided CONVERSATION HISTORY. "
+            
+            "VERY IMPORTANT: Evaluate the LATEST query IN THE CONTEXT of the history. "
+            "If the query refers to specific files, functions, or concepts mentioned earlier in the history (e.g., 'the divide function', 'calculator.py'), "
+            "and this reference is understandable given that context, consider the query CLEAR, even if it might seem general out of context. "
+            "Do NOT ask for clarification if the context likely provides the necessary specifics (e.g., if 'calculator.py' was discussed, 'validate the code in calculator.py' is CLEAR)."
+            
+            "If, AFTER considering the history, the LATEST query is genuinely ambiguous (e.g., asks about 'the function' without prior context) or needs more specific details to be actionable, "
+            "formulate a SINGLE, concise, specific question to ask the user for clarification. "
+            
+            "If the query IS clear enough (considering the history), respond ONLY with the exact word 'CLEAR'."
         )
-        history_context = "\n\nConversation History (for context):\n" + "\n".join([f"{msg['role']}: {msg['content'][:100]}..." for msg in conversation_history[-5:]]) if conversation_history else ""
+        history_context = "\n\nConversation History (for context):\n" + "\n".join([f"{msg['role']}: {msg['content'][:150]}..." for msg in conversation_history[-6:]]) if conversation_history else " (No history provided)"
 
         user_prompt = (
-            f"Analyze the following query: '{query}'.{history_context}\n\n"
-            "Is this query clear and specific enough (considering the history) to proceed? "
-            "If not, provide the single clarifying question to ask the user. "
-            "If it is clear and specific, respond ONLY with the word 'CLEAR'."
+            f"Analyze the user's LATEST query below, considering the conversation history for context:\n\n---\nLATEST QUERY: {query}\n---\n{history_context}\n\n"
+            "Is this LATEST query clear and specific enough to proceed with code-related tasks, given the history? "
+            "If yes, respond ONLY with the word 'CLEAR'. "
+            "If no, provide ONLY the single clarifying question to ask the user."
         )
 
         messages = [
@@ -51,12 +59,19 @@ class Reflector:
         ]
 
         try:
-            response = await self.provider.generate_completion(messages, temperature=0.2)
+            response = await self.provider.generate_completion(messages, temperature=0.1) # Lower temp for more deterministic output
             # Simple validation: Check if response is empty or just whitespace
             if not response or response.isspace():
                  logger.warning("LLM returned empty response for query clarity assessment.")
                  return "CLEAR" # Default to clear if assessment fails or is empty
-            return response.strip()
+
+            # Explicitly check if the response is *exactly* 'CLEAR'
+            if response.strip() == 'CLEAR':
+                return 'CLEAR'
+            else:
+                # If not 'CLEAR', assume it's a clarifying question
+                return response.strip()
+
         except Exception as e:
             logger.error(f"Error during query clarity assessment: {e}", exc_info=True)
             # In case of error, assume the query is clear to avoid blocking the flow

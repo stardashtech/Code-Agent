@@ -72,7 +72,7 @@ async def main():
     # Ensure collection is ready (optional: clear if needed for demo reproducibility)
     try:
         # await agent.vector_store_manager._delete_collection() # Uncomment to clear before run
-        await agent.vector_store_manager._ensure_collection_exists()
+        agent.vector_store_manager._ensure_collection_exists()
     except Exception as e:
         logger.error(f"Failed to prepare vector store collection: {e}", exc_info=True)
         # Decide if we should stop or continue without storing

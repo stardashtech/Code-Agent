@@ -115,8 +115,16 @@
     "id": "CODE-002",
     "area": "Code Quality",
     "task": "Add Comprehensive Tests",
-    "description": "Implement unit and integration tests covering all major functionalities and edge cases. Created initial test file tests/services/test_vector_store_manager.py with pytest structure, fixtures, mocks, and basic test cases for the refactored VectorStoreManager. More tests needed.",
+    "description": "Implement unit and integration tests covering all major functionalities and edge cases. Created initial test file tests/services/test_vector_store_manager.py with pytest structure, fixtures, mocks, and basic test cases for the refactored VectorStoreManager. Added tests/services/test_docker_runner.py. More tests needed, especially for PlanExecutor and integrations.",
     "priority": "Medium",
     "status": "in-progress"
+  },
+  {
+    "id": "ENHANCE-007",
+    "area": "Agent Core Logic",
+    "task": "Improve Reflector Query Clarity Assessment",
+    "description": "Modify the Reflector agent's assess_query_clarity method and prompts to better utilize conversation history and potentially available code context (e.g., from vector store) to reduce unnecessary requests for clarification, especially when the query refers to known code elements.",
+    "priority": "High",
+    "status": "todo"
   }
 ] 
