@@ -49,7 +49,7 @@ if __name__ == "__main__":
 async def main():
     # Configuration (ensure environment variables like OPENAI_API_KEY are set if needed)
     agent_config = Config(
-        openai_api_key=settings.openai_api_key, 
+        openai_api_key=settings.openai_api_key,
         openai_model=settings.openai_model,
         embedding_dimension=settings.embedding_dimension,
         qdrant_host=settings.qdrant_url,
@@ -57,20 +57,37 @@ async def main():
         redis_port=settings.redis_port,
         cache_ttl=settings.cache_ttl
     )
-    agent = CodeAgent(agent_config)
-    logger.info("Initialized CodeAgent")
+    try:
+        agent = CodeAgent(agent_config)
+        logger.info("Initialized CodeAgent")
+        # Check if sandbox runner is available after init
+        if not agent.sandbox_runner:
+            logger.warning("DockerSandboxRunner failed to initialize (Docker likely not running or accessible). Code validation step will be skipped.")
+    except Exception as e:
+        logger.critical(f"Failed to initialize CodeAgent: {e}", exc_info=True)
+        return # Cannot proceed without agent
 
     # 1. Store sample code
     logger.info("\n1. Storing sample code files...")
+    # Ensure collection is ready (optional: clear if needed for demo reproducibility)
     try:
-        # Clear existing data first for a clean demo
-        await agent.store_code("placeholder", "", "python", clear_existing=True)
+        # await agent.vector_store_manager._delete_collection() # Uncomment to clear before run
+        await agent.vector_store_manager._ensure_collection_exists()
+    except Exception as e:
+        logger.error(f"Failed to prepare vector store collection: {e}", exc_info=True)
+        # Decide if we should stop or continue without storing
+        # return # Example: Stop if vector store is critical
+
+    try:
+        # Store the actual code files
         for file_path, content in SAMPLE_CODE.items():
-            result = await agent.store_code(file_path, content, "python", clear_existing=False)
-            logger.info(f"Stored {file_path} in collection {agent.collection_name}: {result}")
+            result = await agent.store_code(file_path, content, "python") # Removed clear_existing flag
+            # Access collection name via vector_store_manager
+            collection_name = agent.vector_store_manager.collection_name
+            logger.info(f"Store result for {file_path} in {collection_name}: {result}")
     except Exception as e:
          logger.error(f"Error storing code: {e}", exc_info=True)
-         return # Stop if storing fails
+         # Decide if we should stop or continue
 
     # 2. Test different queries
     logger.info("\n2. Testing different queries...")
@@ -78,7 +95,8 @@ async def main():
         "How does the calculator code work?",
         "How can I add a new function to calculate power (exponentiation) in calculator.py?",
         "Is there any potential bug in the divide function?",
-        "How can I improve error handling in the calculator functions?"
+        "How can I improve error handling in the calculator functions?",
+        "Validate the code in calculator.py" # Add a query likely to trigger validation
     ]
 
     for query in queries:
@@ -93,13 +111,18 @@ async def main():
             result = await agent.run(query, conversation_history=history)
 
             # Print results based on the new structure
-            logger.info(f"\nQuery Assessment: {result.get('clarification_needed', 'N/A')}")
-            logger.info(f"Extracted Keywords: {result.get('extracted_keywords', [])}")
-            logger.info(f"Decomposed Queries: {result.get('decomposed_queries', [])}")
-            logger.info(f"Initial Plan: {result.get('initial_plan', [])}")
+            logger.info(f"\nStatus: {result.get('status', 'N/A')} | Message: {result.get('message', 'N/A')}")
+            logger.info(f"Clarification Needed: {result.get('clarification_needed', 'N/A')}")
+
+            # --- Access results via the 'results' key --- #
+            agent_results = result.get('results', {})
+
+            logger.info(f"Extracted Keywords: {agent_results.get('extracted_keywords', [])}")
+            logger.info(f"Decomposed Queries: {agent_results.get('decomposed_queries', [])}")
+            logger.info(f"Initial Plan: {result.get('initial_plan', [])}") # Plan is top-level
 
             logger.info("\nRelevant Code Snippets:")
-            snippets = result.get('code_snippets', [])
+            snippets = agent_results.get('code_snippets', [])
             if snippets:
                 for snippet in snippets:
                     logger.info(f"\nFile: {snippet.get('file_path', 'N/A')}")
@@ -109,11 +132,27 @@ async def main():
             else:
                 logger.info("No snippets found.")
 
+            # Print search results if they exist
+            for search_key in ["web_search_results", "github_search_results", "stackoverflow_search_results"]:
+                search_results = agent_results.get(search_key)
+                if search_results is not None:
+                    logger.info(f"\n{search_key.replace('_', ' ').title()}:")
+                    logger.info(pformat(search_results))
+
             logger.info("\nResult Summary:")
-            summary = result.get('result_summary', {})
-            logger.info(f"Analysis Summary:\n{summary.get('analysis_summary', 'N/A')}")
-            fix_details = summary.get('fix_details', {})
-            logger.info(f"Fix Details:\n{pformat(fix_details)}") # Use pformat for readable dict output
+            logger.info(f"Analysis Summary:\n{agent_results.get('analysis_summary', 'N/A')}")
+            fix_details = agent_results.get('fix_details', {})
+            logger.info(f"Fix Details:\n{pformat(fix_details)}")
+
+            # Print validation status if it exists
+            validation_status = agent_results.get('validation_status')
+            if validation_status:
+                logger.info(f"\nValidation Status:\n{pformat(validation_status)}")
+            
+            # Print apply fix status if it exists
+            apply_fix_status = agent_results.get('apply_fix_status')
+            if apply_fix_status:
+                logger.info(f"\nApply Fix Status:\n{pformat(apply_fix_status)}")
 
             logger.info("\nMetadata:")
             metadata = result.get('metadata', {})

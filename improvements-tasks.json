@@ -1,0 +1,122 @@
+[
+  {
+    "id": "ISSUE-001",
+    "area": "LLM Interaction",
+    "task": "Fix JSON type mismatches from LLM response",
+    "description": "Investigate and fix why LLM sometimes returns incorrect data types (e.g., dict/list instead of string) for 'fixed_code' and 'file_path' fields. Strengthened prompt in _generate_code_fix to explicitly require string or null for these fields. Validation logic already handles incorrect types by defaulting to null.",
+    "priority": "High",
+    "status": "completed"
+  },
+  {
+    "id": "ISSUE-002",
+    "area": "LLM Interaction",
+    "task": "Investigate fixed_code syntax check failures",
+    "description": "Determine why the syntax check for the 'fixed_code' field sometimes fails. Switched from compile() to ast.parse() for checking, improved pre-check code cleanup, and enhanced logging on failure to show the problematic code.",
+    "priority": "Medium",
+    "status": "completed"
+  },
+  {
+    "id": "ISSUE-003",
+    "area": "Data Management",
+    "task": "Improve Qdrant data consistency",
+    "description": "Review 'store_code' and '_save_interaction' to ensure only valid data is stored. Prevent storing entries with missing or null 'code' fields unless explicitly intended. Added checks to VectorStoreManager.index_code and store_code to prevent indexing/storing empty content.",
+    "priority": "Medium",
+    "status": "completed"
+  },
+  {
+    "id": "ENHANCE-001",
+    "area": "Agent Core Logic",
+    "task": "Utilize reflection outputs (keywords, decomposition, plan)",
+    "description": "Modify search logic to use extracted keywords (Implemented). Use decomposed queries to perform multiple searches or structure analysis (Implemented via passing decomposition to analysis context). Integrate the generated plan to guide agent execution (Implemented).",
+    "priority": "High",
+    "status": "completed"
+  },
+  {
+    "id": "ENHANCE-002",
+    "area": "Tool Integration",
+    "task": "Integrate Web Search tool",
+    "description": "Added capability to use the 'web_search' tool when local context or LLM knowledge is insufficient. Planner updated to suggest 'Web Search' step. Agent run method updated to execute plan steps, including calling web search (simulated/placeholder for actual tool call mechanism) and integrating results.",
+    "priority": "High",
+    "status": "completed"
+  },
+  {
+    "id": "ENHANCE-003",
+    "area": "Tool Integration",
+    "task": "Integrate GitHub/Stack Overflow Search",
+    "description": "Implement search functionality using available providers. Added initialization for GitHubSearchProvider and StackOverflowSearchProvider. Updated Planner to include these as potential steps. Updated CodeAgent.run to execute these steps and integrate results into analysis.",
+    "priority": "Medium",
+    "status": "completed"
+  },
+  {
+    "id": "ENHANCE-004",
+    "area": "Tool Integration",
+    "task": "Enhance File System Interaction (Apply Fixes)",
+    "description": "Enable the agent to apply generated fixes. Updated Planner to suggest 'Apply Fix' step. Updated CodeAgent.run to handle the step, calling edit_file tool (simulated) using 'fixed_code' from fix_details. Handling 'changes' array needs further implementation.",
+    "priority": "High",
+    "status": "completed"
+  },
+  {
+    "id": "ENHANCE-005A",
+    "area": "Agent Core Logic",
+    "task": "Research and Choose Sandbox Technology",
+    "description": "Researched sandbox technologies (Docker, firejail, Python restricted modes). Selected Docker based on isolation, cross-platform potential, and community support, despite potential overhead compared to firejail.",
+    "priority": "Medium",
+    "status": "completed"
+  },
+  {
+    "id": "ENHANCE-005B",
+    "area": "Agent Core Logic",
+    "task": "Define Sandbox Runner Interface",
+    "description": "Define a Python interface or base class (e.g., SandboxRunner) to abstract the process of running code in the chosen sandbox environment. Specify required methods (e.g., run_code) and expected return values (stdout, stderr, exit_code, errors). Implemented SandboxExecutionResult dataclass and SandboxRunner abstract base class in app/services/sandbox_runner.py.",
+    "priority": "Medium",
+    "status": "completed"
+  },
+  {
+    "id": "ENHANCE-005C",
+    "area": "Agent Core Logic",
+    "task": "Implement Sandbox Runner (Chosen Tech)",
+    "description": "Implement the SandboxRunner interface using the technology chosen in ENHANCE-005A (e.g., implement DockerSandboxRunner). Handle code input, execution within the sandbox, resource limits, timeout, and capturing results. Created app/services/docker_runner.py with DockerSandboxRunner implementation.",
+    "priority": "High",
+    "status": "completed"
+  },
+  {
+    "id": "ENHANCE-005D",
+    "area": "Agent Core Logic",
+    "task": "Integrate Sandbox Runner into Agent",
+    "description": "Update the 'Validate Code (Sandbox)' step in CodeAgent.run to instantiate and use the implemented SandboxRunner (from ENHANCE-005C) to execute and validate generated code. Added DockerSandboxRunner initialization in CodeAgent.__init__ and updated the run method to call sandbox_runner.run_code.",
+    "priority": "Medium",
+    "status": "completed"
+  },
+  {
+    "id": "ENHANCE-006",
+    "area": "User Interaction",
+    "task": "Implement Interactive Query Clarification",
+    "description": "When a query is assessed as ambiguous, prompt the user for clarification instead of just proceeding. Updated CodeAgent.run to return early with status 'clarification_needed' and a user-facing message.",
+    "priority": "Medium",
+    "status": "completed"
+  },
+  {
+    "id": "UX-001",
+    "area": "Output & User Experience",
+    "task": "Refine final JSON output structure",
+    "description": "Ensure the final response JSON is consistently structured, easy to parse, and clearly separates analysis, fixes, and metadata. Refactored CodeAgent.run to return most outputs under a top-level 'results' key. Resolved ambiguity between 'fixed_code' and 'changes' needs further review (possibly in ISSUE-001).",
+    "priority": "Medium",
+    "status": "completed"
+  },
+  {
+    "id": "CODE-001",
+    "area": "Code Quality",
+    "task": "Refactor CodeAgent class",
+    "description": "Refactor the CodeAgent class into smaller, more focused modules/classes as complexity grows. Initial step completed: Extracted vector store logic into VectorStoreManager class. Second step: Extracted plan execution logic from CodeAgent.run into a new PlanExecutor class (app/services/plan_executor.py). Further refactoring can be done later.",
+    "priority": "Low",
+    "status": "completed"
+  },
+  {
+    "id": "CODE-002",
+    "area": "Code Quality",
+    "task": "Add Comprehensive Tests",
+    "description": "Implement unit and integration tests covering all major functionalities and edge cases. Created initial test file tests/services/test_vector_store_manager.py with pytest structure, fixtures, mocks, and basic test cases for the refactored VectorStoreManager. More tests needed.",
+    "priority": "Medium",
+    "status": "in-progress"
+  }
+] 
