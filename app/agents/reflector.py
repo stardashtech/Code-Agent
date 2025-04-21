@@ -43,7 +43,7 @@ class Reflector:
             "VERY IMPORTANT: Evaluate the LATEST query IN THE CONTEXT of the history AND code context. "
             "Code Context might include relevant file paths or function names. "
             "If the query refers to specific elements (files, functions like 'the divide function', 'calculator.py') mentioned in the history OR present in the code context, "
-            "and this reference is understandable given that context, consider the query CLEAR, even if it might seem general out of context. "
+            "and this reference is understandable given that context, STRONGLY prefer to consider the query CLEAR, even if it might seem general out of context. "
             "Do NOT ask for clarification if the context (history or code context) likely provides the necessary specifics (e.g., if 'calculator.py' is in the code context, 'validate the code in calculator.py' is CLEAR)."
             
             "If, AFTER considering ALL context, the LATEST query is genuinely ambiguous (e.g., asks about 'the function' without prior context or code context mentions) or needs more specific details to be actionable, "

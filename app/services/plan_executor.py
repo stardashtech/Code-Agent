@@ -49,7 +49,7 @@ class PlanExecutor:
                 if step_name == "Search Code (Vector Store)":
                     search_query_param = step.get('query', query)
                     use_keywords = step.get('use_keywords', True)
-                    final_search_query = f"{search_query_param} {' '.join(execution_context['extracted_keywords'])}" if use_keywords else search_query_param
+                    final_search_query = f"{search_query_param} {' '.join(execution_context.get('keywords', []))}" if use_keywords else search_query_param
                     logger.info(f"Performing vector search with query: '{final_search_query}'")
                     # --- ENHANCE-008: Add filter to main search step --- #
                     code_filter = {"type": "code_master"} # Default to searching master code

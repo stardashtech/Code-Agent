@@ -25,6 +25,10 @@ from app.services.docker_runner import DockerSandboxRunner
 from app.services.plan_executor import PlanExecutor
 from app.tools.web_search import TavilySearchProvider # <-- Added import
 
+# Import providers from their new locations
+from app.tools.github_search import GitHubSearchProvider 
+from app.tools.stackoverflow_search import StackOverflowSearchProvider
+
 logger = logging.getLogger(__name__)
 
 class Config:
@@ -368,103 +372,6 @@ class VLLMProvider(LLMProvider):
             logger.error(f"Error generating embedding with vLLM: {str(e)}")
             raise
 
-class CodeSearchProvider:
-    """Base class for code search providers"""
-    async def search(self, query: str, language: Optional[str] = None) -> List[Dict[str, Any]]:
-        raise NotImplementedError
-
-class GitHubSearchProvider(CodeSearchProvider):
-    """GitHub code search provider with enhanced error handling and pagination."""
-    def __init__(self, access_token: Optional[str] = None):
-        # Explicitly use token from settings
-        self.access_token = access_token or settings.github_token 
-        self.headers = {
-            "Authorization": f"token {self.access_token}",
-            "Accept": "application/vnd.github.v3+json"
-        } if self.access_token else {
-            "Accept": "application/vnd.github.v3+json"
-        }
-        if not self.access_token:
-            logger.warning("GitHub token not provided. GitHub search may be rate-limited.")
-        
-    async def search(self, query: str, language: Optional[str] = None, per_page: int = 30) -> List[Dict[str, Any]]:
-        """Search GitHub for code, handling errors and pagination.
-
-        Args:
-            query: The search query.
-            language: Optional language filter.
-            per_page: Results per page (max 100, default 30).
-
-        Returns:
-            A list of search results (items), or an empty list on error.
-        """
-        search_query = f"{query} language:{language}" if language else query
-        params = {"q": search_query, "per_page": min(per_page, 100)} # Enforce max 100
-        
-        logger.debug(f"GitHub Search - Query: '{search_query}', Params: {params}")
-        
-        # Using a single session for potential retries (though not implemented here)
-        async with aiohttp.ClientSession(headers=self.headers) as session:
-            try:
-                async with session.get("https://api.github.com/search/code", params=params) as response:
-                    # Check status code
-                    if response.status == 200:
-                        try:
-                            result = await response.json()
-                            items = result.get("items", [])
-                            logger.info(f"GitHub search successful. Found {len(items)} items for query: '{query}'")
-                            # TODO: Implement further pagination if result['total_count'] > len(items)
-                            return items
-                        except json.JSONDecodeError as json_err:
-                            logger.error(f"GitHub search failed: Invalid JSON response for query '{query}'. Error: {json_err}")
-                            return []
-                        except Exception as parse_err: # Catch other potential issues processing response
-                             logger.error(f"GitHub search failed: Error processing response for query '{query}'. Error: {parse_err}")
-                             return []
-                    # Handle specific error codes
-                    elif response.status == 403:
-                        rate_limit_info = response.headers.get('X-RateLimit-Remaining', 'N/A')
-                        reset_time = response.headers.get('X-RateLimit-Reset', 'N/A')
-                        logger.warning(f"GitHub search failed (403 Forbidden): Rate limit likely exceeded or invalid token. Remaining: {rate_limit_info}, Reset: {reset_time}")
-                        # Optionally parse reset time and wait/retry
-                        return []
-                    elif response.status == 422:
-                        error_details = await response.text() # Get error details if possible
-                        logger.error(f"GitHub search failed (422 Unprocessable Entity): Invalid query '{search_query}'. Details: {error_details[:200]}...")
-                        return []
-                    else:
-                        # General error for other statuses
-                        error_text = await response.text()
-                        logger.error(f"GitHub search failed with status {response.status} for query '{query}'. Response: {error_text[:200]}...")
-                        return []
-            except aiohttp.ClientError as client_err:
-                logger.error(f"GitHub search failed: Network error for query '{query}'. Error: {client_err}")
-                return []
-            except Exception as e:
-                # Catch-all for unexpected errors
-                logger.error(f"GitHub search failed: Unexpected error for query '{query}'. Error: {e}", exc_info=True)
-                return []
-
-class StackOverflowSearchProvider(CodeSearchProvider):
-    """Stack Overflow search provider"""
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key
-        
-    async def search(self, query: str, language: Optional[str] = None) -> List[Dict[str, Any]]:
-        params = {
-            "site": "stackoverflow",
-            "key": self.api_key,
-            "tagged": language if language else None,
-            "q": query
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://api.stackexchange.com/2.3/search/advanced",
-                params={k: v for k, v in params.items() if v is not None}
-            ) as response:
-                result = await response.json()
-                return result.get("items", [])
-
 class CodeAgent:
     """Main agent class that orchestrates LLM interactions and tool usage."""
     def __init__(self, config: Config):
@@ -479,23 +386,35 @@ class CodeAgent:
         self.stackoverflow_search_provider: Optional[StackOverflowSearchProvider] = None
 
         # Initialize LLM Provider
-        if settings.llm_provider == "openai" and settings.openai_api_key:
-            logger.info("Initializing OpenAI provider")
+        # Temporarily force OpenAI for testing
+        # if settings.llm_provider == "openai" and settings.openai_api_key:
+        if settings.openai_api_key: # Force check for OpenAI key
+            logger.info("Initializing OpenAI provider (Forced for testing)")
             self.provider = OpenAIProvider(settings.openai_api_key, settings.openai_model)
-        elif settings.llm_provider == "openrouter" and settings.openrouter_api_key:
-            logger.info("Initializing OpenRouter provider")
-            self.provider = OpenRouterProvider(settings.openrouter_api_key, settings.openrouter_model)
-        elif settings.llm_provider == "ollama":
-            logger.info("Initializing Ollama provider")
-            self.provider = OllamaProvider(model=settings.ollama_model)
-        elif settings.llm_provider == "vllm":
-            logger.info("Initializing vLLM provider")
-            # Assuming VLLMProvider uses settings directly or needs them passed
-            self.provider = VLLMProvider()
+        # elif settings.llm_provider == "openrouter" and settings.openrouter_api_key:
+        #     logger.info("Initializing OpenRouter provider")
+        #     self.provider = OpenRouterProvider(settings.openrouter_api_key, settings.openrouter_model)
+        # elif settings.llm_provider == "ollama":
+        #     logger.info("Initializing Ollama provider")
+        #     self.provider = OllamaProvider(model=settings.ollama_model)
+        # elif settings.llm_provider == "vllm":
+        #     logger.info("Initializing vLLM provider")
+        #     self.provider = VLLMProvider()
         else:
-            logger.warning(f"LLM Provider '{settings.llm_provider}' not configured or API key missing. Falling back...")
-            # Fallback logic or raise error - currently raises later if None
-            pass
+            logger.warning(f"OpenAI API key not found, or other providers not configured. Falling back...")
+            # Attempt other providers if OpenAI key is missing
+            if settings.llm_provider == "openrouter" and settings.openrouter_api_key:
+                logger.info("Initializing OpenRouter provider (Fallback)")
+                self.provider = OpenRouterProvider(settings.openrouter_api_key, settings.openrouter_model)
+            elif settings.llm_provider == "ollama":
+                logger.info("Initializing Ollama provider (Fallback)")
+                self.provider = OllamaProvider(model=settings.ollama_model)
+            elif settings.llm_provider == "vllm":
+                logger.info("Initializing vLLM provider (Fallback)")
+                self.provider = VLLMProvider()
+            else:
+                logger.warning(f"LLM Provider '{settings.llm_provider}' not configured or API key missing.")
+                pass # Keep self.provider as None
         
         if not self.provider:
             raise ValueError("No valid LLM provider could be initialized based on configuration.")
@@ -504,23 +423,24 @@ class CodeAgent:
         self.reflector = Reflector(self.provider)
         self.planner = Planner(self.provider)
 
-        # Initialize Search Providers (Optional)
+        # Initialize Search Providers (using imported classes)
         try:
+            # Use imported GitHubSearchProvider
             self.github_search_provider = GitHubSearchProvider(access_token=settings.github_token)
-            logger.info("Initialized GitHubSearchProvider.")
+            logger.info("Initialized GitHubSearchProvider from app.tools.github_search.")
         except Exception as e:
             logger.warning(f"Could not initialize GitHubSearchProvider: {e}.")
             self.github_search_provider = None
         try:
+             # Use imported StackOverflowSearchProvider
              self.stackoverflow_search_provider = StackOverflowSearchProvider(api_key=settings.stackoverflow_key)
-             logger.info("Initialized StackOverflowSearchProvider.")
+             logger.info("Initialized StackOverflowSearchProvider from app.tools.stackoverflow_search.")
         except Exception as e:
              logger.warning(f"Could not initialize StackOverflowSearchProvider: {e}.")
              self.stackoverflow_search_provider = None
         # <-- Initialize Tavily Search Provider -->
         try:
             self.web_search_provider = TavilySearchProvider()
-            # Initialization logging is handled within TavilySearchProvider
         except Exception as e:
             logger.error(f"Failed to initialize TavilySearchProvider: {e}.", exc_info=True)
             self.web_search_provider = None
@@ -542,25 +462,22 @@ class CodeAgent:
         
         # Initialize Vector Store Manager
         try:
-            # Pass the agent's embedding function (which handles caching)
             self.vector_store_manager = VectorStoreManager(
-                qdrant_host=config.qdrant_host, # Assuming this holds the URL
+                qdrant_host=config.qdrant_host, 
                 embedding_dimension=config.embedding_dimension,
-                embedding_func=self.generate_embedding # Pass the caching embedding func
+                embedding_func=self.generate_embedding 
             )
         except Exception as e:
              logger.critical(f"Failed to initialize VectorStoreManager: {e}", exc_info=True)
-             raise # Vector store is critical, re-raise
+             raise 
 
         # Initialize Sandbox Runner
         try:
             self.sandbox_runner = DockerSandboxRunner()
-            # Consider running initialize asynchronously if needed
-            # asyncio.create_task(self.sandbox_runner.initialize())
             logger.info("DockerSandboxRunner initialized successfully.")
         except RuntimeError as e:
              logger.error(f"Failed to initialize DockerSandboxRunner: {e}. Code validation will be skipped.", exc_info=True)
-             self.sandbox_runner = None # Ensure it's None if init fails
+             self.sandbox_runner = None 
         except Exception as e:
              logger.error(f"An unexpected error occurred during DockerSandboxRunner initialization: {e}", exc_info=True)
              self.sandbox_runner = None
@@ -572,7 +489,6 @@ class CodeAgent:
         logger.info("CodeAgent initialized successfully")
         
     async def generate_completion(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
-        """Generate completion using the configured provider"""
         if not self.provider:
             raise RuntimeError("LLM Provider not initialized.")
         try:
@@ -582,7 +498,6 @@ class CodeAgent:
             raise
             
     async def generate_embedding(self, text: str) -> List[float]:
-        """Get embedding for text using the configured provider, with caching."""
         cache_key = f"embedding:{hashlib.sha256(text.encode()).hexdigest()}"
         if self.redis_client:
             try:
@@ -619,7 +534,6 @@ class CodeAgent:
 
     async def _generate_code_fix(self, query: str, code_snippets: List[Dict[str, Any]], 
                           analysis: str) -> Dict[str, Any]:
-        """Generate code fix using LLM based on the query and found code snippets."""
         if not self.provider:
              logger.error("LLM Provider not available for code fix generation.")
              return self._generate_error_response("LLM Provider not configured.")
@@ -628,11 +542,9 @@ class CodeAgent:
             logger.warning("No code snippets provided for fix generation")
             return self._generate_error_response("No code snippets available for analysis")
 
-        # Prepare context from code snippets (limit to most relevant)
-        # Using similarity score which is available from search_code results
         relevant_snippets = sorted(code_snippets, key=lambda x: x.get('similarity', 0), reverse=True)[:2]
         code_context = "\n\n".join([
-            f"File: {snippet.get('file_path', 'unknown')}\n```\n{snippet.get('code', '')}\n```" # Use 'code' key
+            f"File: {snippet.get('file_path', 'unknown')}\n```\n{snippet.get('code', '')}\n```"
             for snippet in relevant_snippets
         ])
 
@@ -664,675 +576,353 @@ Example response format:
     ]
 }"""
 
-        fix_prompt = f"""Review and suggest improvements for the code based on the query and analysis:
+        user_prompt = f"""User Query: {query}\n\nCode Context:\n{code_context}\n\nPrevious Analysis:\n{analysis}\n\nPlease provide the fix in the specified JSON format."""
 
-User Query: {query}
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
 
-Initial Analysis:
-{analysis}
-
-Relevant Code Context:
-{code_context}
-
-STRICT RESPONSE RULES (REPEAT):
-1. Return ONLY a valid JSON object adhering to the structure specified in the system prompt.
-2. NO markdown formatting around the JSON.
-3. NO explanatory text outside the JSON object.
-4. Ensure all JSON strings are properly escaped (use \\n for newlines).
-5. Use double quotes for all keys and string values.
-6. The value for 'fixed_code' MUST be a single JSON string (with escaped newlines) or null.
-7. The value for 'file_path' MUST be a JSON string or null.
-8. Provide specific changes in the 'changes' array if applicable, but 'fixed_code' and 'file_path' must still adhere to their type rules (string or null)."""
-
-        try:
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": fix_prompt}
-            ]
-
-            logger.debug(f"Attempting code fix generation with provider: {self.provider.__class__.__name__}")
-            # Use the instance provider and await the coroutine
-            raw_content = await self.provider.generate_completion(messages, temperature=0.2)
-
-            # Clean and validate the response
-            cleaned_content = self._clean_json_response(raw_content)
-            if not cleaned_content or cleaned_content == "{}":
-                logger.warning(f"Provider {self.provider.__class__.__name__} returned empty or invalid JSON structure for code fix.")
-                # Fallback: return the raw analysis if fix generation failed badly
-                return {"status": "warning", "explanation": "Failed to generate a structured code fix. Analysis provided.", "analysis": analysis}
-
+        max_retries = 2
+        attempts = 0
+        while attempts <= max_retries:
+            attempts += 1
             try:
-                code_fix = json.loads(cleaned_content)
-            except json.JSONDecodeError as je:
-                logger.error(f"JSON parsing error for code fix from {self.provider.__class__.__name__}: {str(je)}")
-                logger.debug(f"Problematic JSON content for code fix: {cleaned_content[:500]}...")
-                # Fallback: return the raw analysis
-                return {"status": "error", "explanation": f"Failed to parse code fix JSON: {je}", "analysis": analysis}
+                logger.info(f"Attempt {attempts}: Generating code fix...")
+                response_text = await self.generate_completion(messages)
+                logger.debug(f"Raw LLM fix response: {response_text}")
+                
+                # Clean the response
+                cleaned_response_text = self._clean_json_response(response_text)
+                logger.debug(f"Cleaned LLM fix response: {cleaned_response_text}")
 
-            # Validate and fix the response structure
-            code_fix = self._validate_and_fix_response(code_fix, self.provider)
-
-            # --- Syntax check using ast.parse --- 
-            if code_fix.get('fixed_code') and isinstance(code_fix['fixed_code'], str):
-                code_to_check = code_fix['fixed_code']
-                # Basic cleanup: remove leading/trailing whitespace and escaped newlines
-                # Also handle potential \r\n
+                # Attempt to parse as JSON
                 try:
-                    code_to_check = code_to_check.strip().replace('\\r\\n', '\n').replace('\\n', '\n')
-                    # Ensure it's treated as a block, potentially adding a pass if empty after strip
-                    if not code_to_check:
-                         code_to_check = "pass" 
+                    fix_details = json.loads(cleaned_response_text)
+                    if not isinstance(fix_details, dict):
+                         raise json.JSONDecodeError("Response is not a JSON object.", cleaned_response_text, 0)
                          
-                    ast.parse(code_to_check) # Use ast.parse
-                    logger.info("Generated fixed_code passed syntax check (ast.parse).")
-                    code_fix['syntax_check'] = {'status': 'passed'}
-                except SyntaxError as se:
-                    # Log the error and the problematic code for debugging
-                    logger.warning(f"Syntax error in generated fixed_code: {str(se)}")
-                    # Log the code that failed at WARNING level for visibility
-                    logger.warning(f"Code that failed syntax check (ast.parse):\n------START CODE------\n{code_to_check}\n------END CODE------") 
-                    code_fix['syntax_check'] = {'status': 'failed', 'error': str(se), 'line': getattr(se, 'lineno', None), 'offset': getattr(se, 'offset', None)}
-                except Exception as parse_e: # Catch other potential errors during parsing
-                     logger.error(f"Unexpected error during ast.parse syntax check: {parse_e}", exc_info=True)
-                     logger.warning(f"Code that caused parse error:\n------START CODE------\n{code_to_check}\n------END CODE------") 
-                     code_fix['syntax_check'] = {'status': 'error', 'error': f"AST parse failed: {parse_e}"}
-            else:
-                 # If fixed_code isn't provided or is not a string, indicate syntax check wasn't applicable
-                 # Avoid overwriting if already set (e.g. by validation)
-                 if 'syntax_check' not in code_fix: 
-                    code_fix['syntax_check'] = {'status': 'not_applicable', 'reason': 'No fixed_code string provided'}
+                    # Basic validation of structure (can be expanded)
+                    # Enhanced validation (from ISSUE-001)
+                    if 'fixed_code' in fix_details and not isinstance(fix_details['fixed_code'], (str, type(None))):
+                        logger.warning(f"LLM returned non-string/null type for fixed_code: {type(fix_details['fixed_code'])}. Setting to null.")
+                        fix_details['fixed_code'] = None
+                    if 'file_path' in fix_details and not isinstance(fix_details['file_path'], (str, type(None))):
+                        logger.warning(f"LLM returned non-string/null type for file_path: {type(fix_details['file_path'])}. Setting to null.")
+                        fix_details['file_path'] = None
+                        
+                    # Syntax check (from ISSUE-002)
+                    fixed_code_to_check = fix_details.get('fixed_code')
+                    syntax_check_result = {"status": "not_attempted", "error": None}
+                    if isinstance(fixed_code_to_check, str) and fixed_code_to_check.strip():
+                        try:
+                            # Clean up potential LLM artifacts before parsing
+                            cleaned_code = fixed_code_to_check.strip().lstrip("`").rstrip("`").strip()
+                            # Remove potential language identifier like ```python
+                            if cleaned_code.startswith("python\n"):
+                                cleaned_code = cleaned_code[len("python\n"):]
+                            elif cleaned_code.startswith("python "):
+                                 cleaned_code = cleaned_code[len("python "):]
+                                 
+                            ast.parse(cleaned_code) 
+                            syntax_check_result = {"status": "passed", "error": None}
+                            logger.info("Generated fixed_code passed syntax check.")
+                        except SyntaxError as syn_err:
+                            logger.warning(f"Generated fixed_code failed syntax check: {syn_err}")
+                            logger.debug(f"Problematic Code:\n---\n{fixed_code_to_check}\n---")
+                            syntax_check_result = {"status": "failed", "error": str(syn_err)}
+                        except Exception as parse_e: # Catch other potential errors during parse
+                             logger.error(f"Unexpected error during fixed_code syntax check: {parse_e}")
+                             syntax_check_result = {"status": "error", "error": f"Internal error during syntax check: {parse_e}"}
+                    elif fixed_code_to_check is None:
+                        syntax_check_result = {"status": "skipped", "error": "No fixed code provided."}
+                    else:
+                        syntax_check_result = {"status": "skipped", "error": "Fixed code was empty or invalid type."}
+                        
+                    fix_details['syntax_check'] = syntax_check_result
+                    fix_details["status"] = "success" # Mark success if JSON parsed
+                    return fix_details
 
-            logger.info(f"Code fix generation completed by {self.provider.__class__.__name__}") # More accurate log
-            # Set status to success only if no prior error/warning from validation
-            if code_fix.get('status') != 'error' and code_fix.get('status') != 'warning':
-                 code_fix['status'] = 'success'
-            return code_fix
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Attempt {attempts}: Failed to parse LLM response as JSON: {e}")
+                    if attempts > max_retries:
+                        logger.error("Max retries reached. Failed to get valid JSON for code fix.")
+                        return self._generate_error_response(f"LLM failed to produce valid JSON: {cleaned_response_text}")
+                    await asyncio.sleep(1) # Wait before retry
 
-        except Exception as e:
-            error_msg = f"Unexpected error generating code fix: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            return self._generate_error_response(error_msg)
+            except Exception as e:
+                logger.error(f"Attempt {attempts}: Error generating code fix: {e}", exc_info=True)
+                if attempts > max_retries:
+                    return self._generate_error_response(f"Error generating code fix: {e}")
+                await asyncio.sleep(1)
+                
+        # Should not be reached if logic is correct, but as a safeguard
+        return self._generate_error_response("Failed to generate code fix after retries.")
 
     def _clean_json_response(self, response: str) -> str:
-        """Clean and prepare the response for JSON parsing."""
-        if not response:
-            logger.error("Empty response received for JSON cleaning.")
-            return "{}"
+        response = response.strip()
+        if response.startswith("```json"):
+            response = response[len("```json"):].strip()
+        elif response.startswith("```"):
+             response = response[len("```"):].strip()
+             
+        if response.endswith("```"):
+            response = response[:-len("```")]
+            
+        # Sometimes models might still include explanations after the JSON block
+        # Find the first { and the last } to extract the core JSON part
+        first_brace = response.find('{')
+        last_brace = response.rfind('}')
 
-        try:
-            # Attempt 1: Direct parsing (ideal case)
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            potential_json = response[first_brace:last_brace+1]
+            # Quick check if it looks like valid JSON before returning
+            # This isn't foolproof but catches simple explanation text appended after
             try:
-                json.loads(response.strip())
-                return response.strip()
+                json.loads(potential_json) # Test if it parses
+                return potential_json
             except json.JSONDecodeError:
-                logger.debug("Direct JSON parsing failed, attempting cleaning...")
-
-            # Attempt 2: Find JSON within potential markdown code blocks
-            code_block_pattern = r"```(?:json)?\s*({.*?})\s*```" # Capture content within {} inside block
-            match = re.search(code_block_pattern, response, re.DOTALL)
-            if match:
-                potential_json = match.group(1).strip()
-                try:
-                    json.loads(potential_json)
-                    logger.info("Extracted valid JSON from markdown code block.")
-                    return potential_json
-                except json.JSONDecodeError as e:
-                    logger.debug(f"Invalid JSON found within code block: {e}")
-
-            # Attempt 3: Find the outermost JSON object aggressively
-            json_outer_pattern = r"^.*?(\{.*\}).*?$" # Match from start to first { and last } to end
-            match = re.search(json_outer_pattern, response, re.DOTALL)
-            if match:
-                potential_json = match.group(1).strip()
-                try:
-                    json.loads(potential_json)
-                    logger.info("Extracted potentially valid JSON using outer braces match.")
-                    return potential_json
-                except json.JSONDecodeError as e:
-                     logger.debug(f"Failed to parse JSON extracted via outer braces: {e}")
-                     # Attempt cleanup on this extracted part
-                     # Simple fix: remove trailing commas before closing brace/bracket
-                     cleaned_json = re.sub(r',(\s*[}\]])', r'\1', potential_json)
-                     try:
-                         json.loads(cleaned_json)
-                         logger.info("Successfully parsed JSON after cleaning trailing commas.")
-                         return cleaned_json
-                     except json.JSONDecodeError as final_e:
-                          logger.error(f"Could not parse JSON even after aggressive extraction and cleaning: {final_e}")
-
-
-            logger.error("Could not extract valid JSON from response after multiple attempts.")
-            logger.debug(f"Original response causing JSON cleaning failure: {response[:500]}...")
-            return "{}"
-
-        except Exception as e:
-            logger.error(f"Unexpected error during JSON cleaning: {str(e)}")
-            return "{}"
+                logger.warning("Could not isolate JSON block reliably, returning original cleaned string.")
+                return response # Fallback to original cleaned string if extraction fails
+        else:
+            logger.warning("Could not find valid JSON start/end braces, returning original cleaned string.")
+            return response # Fallback if braces aren't found
 
     def _validate_and_fix_response(self, response: Dict[str, Any], provider: LLMProvider) -> Dict[str, Any]:
-        """Validate and fix the response structure, ensuring expected fields are present."""
-        if not isinstance(response, dict):
-            logger.error("Response to validate is not a dictionary")
-            return self._generate_error_response("Invalid response format (not a dictionary).")
-
-        # Expected fields based on the _generate_code_fix prompt structure
-        expected_fields = {
-            'explanation': (str, ""),
-            'fixed_code': (str, None), # Optional, default None
-            'file_path': (str, None), # Optional, default None
-            'changes': (list, []) # Optional list, default empty
-        }
-
-        validated_response = {}
-        validation_issues = False
-
-        for field, (expected_type, default_value) in expected_fields.items():
-            value = response.get(field)
-            if value is None:
-                if default_value is not None:
-                     validated_response[field] = default_value
-                     if field not in ['fixed_code', 'file_path', 'changes']: # Missing mandatory fields is an issue
-                         logger.warning(f"Missing field '{field}' in code fix response. Using default: '{default_value}'")
-                         validation_issues = True
-                else:
-                     validated_response[field] = None # Keep optional fields as None if missing
-
-            elif not isinstance(value, expected_type):
-                logger.warning(f"Incorrect type for field '{field}' in code fix response. Expected {expected_type}, got {type(value)}. Attempting to use default.")
-                validated_response[field] = default_value
-                validation_issues = True
-            else:
-                validated_response[field] = value
-
-        # Specific validation for 'changes' list structure if present
-        if validated_response['changes'] is not None:
-            valid_changes = []
-            change_item_keys = {'line_number', 'original', 'replacement', 'explanation'}
-            for item in validated_response['changes']:
-                if isinstance(item, dict) and change_item_keys.issubset(item.keys()):
-                    valid_changes.append(item)
-                else:
-                    logger.warning(f"Invalid item found in 'changes' list: {item}. Skipping.")
-                    validation_issues = True
-            validated_response['changes'] = valid_changes
-
-        # Add metadata
-        validated_response['metadata'] = {
-            'timestamp': datetime.now().isoformat(),
-            'provider': provider.__class__.__name__ if provider else 'unknown'
-        }
-
-        # Set status based on validation
-        validated_response['status'] = 'warning' if validation_issues else response.get('status', 'success')
-
-        # Calculate quality score (simple version: 1.0 if no issues, 0.5 if warnings, 0.0 if error)
-        if validated_response['status'] == 'success':
-             validated_response['quality_score'] = 1.0
-        elif validated_response['status'] == 'warning':
-             validated_response['quality_score'] = 0.5
-        else: # error or missing status assumed error
-             validated_response['quality_score'] = 0.0
-
-        # Preserve original error info if passed through
-        if 'error' in response and isinstance(response['error'], dict):
-             validated_response['error'] = response['error']
-             validated_response['status'] = 'error'
-             validated_response['quality_score'] = 0.0
-
-
-        return validated_response
-
+        # This method seems deprecated or unused based on current code flow
+        # Keeping it for reference but potentially remove later
+        logger.warning("_validate_and_fix_response called - may be deprecated")
+        # Simple validation example
+        if "fixed_code" not in response or "file_path" not in response:
+            logger.warning(f"Invalid response format from {provider.__class__.__name__}. Attempting to fix.")
+            # Attempt to fix or return error structure
+            return self._generate_error_response("Invalid response format received")
+        return response
+        
     def _generate_error_response(self, error_message: str) -> Dict[str, Any]:
-        """Generate a standardized error response."""
-        provider_name = self.provider.__class__.__name__ if self.provider else 'unknown'
-
         return {
-            'explanation': f"Error: {error_message}",
-            'fixed_code': None,
-            'file_path': None,
-            'changes': [],
-            'error': {
-                'message': error_message,
-                'timestamp': datetime.now().isoformat()
-            },
-            'status': 'error',
-            'quality_score': 0.0,
-            'metadata': {
-                'timestamp': datetime.now().isoformat(),
-                'provider': provider_name
-            }
+            "status": "error",
+            "explanation": error_message,
+            "fixed_code": None,
+            "file_path": None,
+            "changes": [],
+            "syntax_check": {"status": "n/a", "error": "Error response generated."}
         }
-
+        
+    # --- Data Storage Methods ---
     async def store_code(self, file_path: str, content: str, language: str, clear_existing: bool = False) -> Dict[str, Any]:
-        """API method to store or update code in the vector database."""
         if clear_existing:
-            logger.warning(f"Clearing existing collection via store_code request: {self.vector_store_manager.collection_name}")
-            # Need to handle potential errors if _delete_collection fails
-            try:
-                self.vector_store_manager._delete_collection()
-                self.vector_store_manager._ensure_collection_exists() # Recreate immediately
-            except Exception as e:
-                 logger.error(f"Failed to clear collection during store_code: {e}", exc_info=True)
-                 return {"status": "error", "message": f"Failed to clear collection: {e}"}
+            await self.vector_store_manager.delete_points_by_path(file_path)
+            logger.info(f"Cleared existing vector points for file: {file_path}")
+            
+        if not content or not content.strip():
+             logger.warning(f"Attempted to store empty content for {file_path}. Skipping.")
+             return {"status": "skipped", "reason": "Empty content"}
 
         try:
             point_id = await self.vector_store_manager.store_code(file_path, content, language)
-            if point_id:
-                return {"status": "success", "message": f"Code from {file_path} stored successfully", "id": point_id}
-            else:
-                return {"status": "error", "message": f"Failed to store code for {file_path} in vector store."}
+            return {"status": "success", "point_id": point_id, "file": file_path}
         except Exception as e:
-            logger.error(f"Unexpected error in CodeAgent.store_code for {file_path}: {str(e)}", exc_info=True)
-            return {"status": "error", "message": f"Failed to store code: {str(e)}"}
+            logger.error(f"Failed to store code for {file_path}: {e}", exc_info=True)
+            return {"status": "error", "file": file_path, "error": str(e)}
 
+    async def _save_interaction(self, query: str, response_data: Dict) -> None:
+        # Simplified interaction saving
+        interaction_data = {
+            "query": query,
+            "response_status": response_data.get("status"),
+            "response_message": response_data.get("message")
+            # Add other relevant fields from response if needed
+        }
+        try:
+            await self.vector_store_manager.save_interaction(interaction_data)
+        except Exception as e:
+            logger.error(f"Failed to save interaction: {e}", exc_info=True)
+
+    # --- Core Agent Logic Methods ---
     async def process_mcp_request(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Process a Model Context Protocol (MCP) request."""
-        try:
-            # Run the agent and wrap the response in MCP format
-            result = await self.run(message) # Assumes run() is the main entry point
-
-            # Add MCP-specific context handling
-            mcp_context = context.copy() if context else {}
-            mcp_context["last_query"] = message
-            mcp_context["last_result_status"] = result.get("status")
-
-            return {
-                "result": result,
-                "mcp_context": mcp_context
-            }
-        except Exception as e:
-            logger.error(f"Error processing MCP request: {str(e)}", exc_info=True)
-            return {
-                "result": {
-                    "error": f"Error processing request: {str(e)}",
-                    "status": "error"
-                },
-                "mcp_context": context
-            }
-
+        # Placeholder for MCP interaction logic
+        logger.info(f"Received MCP request: {message}")
+        # Example: Parse message, call other methods, return MCP response
+        if message.startswith("fix:"):
+            query = message[len("fix:"):].strip()
+            return await self.run(query)
+        else:
+            return {"status": "error", "message": "Unknown MCP command"}
+            
     async def process_query(self, query: str) -> Dict:
-        """Process a user query to return relevant code snippets with explanations"""
-        try:
-            clarity_assessment = await self.reflector.assess_query_clarity(query)
-            if clarity_assessment != "CLEAR":
-                 return {
-                     "status": "clarification_needed",
-                     "message": "Query may be ambiguous.",
-                     "assessment": clarity_assessment,
-                     "results": []
-                 }
-
-            # Use VectorStoreManager for search
-            search_results = await self.vector_store_manager.search_code(query)
-
-            if not search_results:
-                return {
-                    "status": "success",
-                    "message": "No relevant code snippets found",
-                    "results": []
-                }
-
-            processed_results = []
-            for result in search_results:
-                if result.get('code') and result.get('language'):
-                    explanation = await self.explain_code(result['code'], result['language'])
-                    result['explanation'] = explanation
-                    processed_results.append(result)
-                else:
-                     logger.warning(f"Skipping explanation for result with missing code/language: {result.get('file_path')}")
-
-            return {
-                "status": "success",
-                "message": f"Found {len(processed_results)} relevant code snippets with explanations",
-                "results": processed_results
-            }
-
-        except Exception as e:
-            logger.error(f"Error processing query: {str(e)}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Error processing query: {str(e)}",
-                "results": []
-            }
+         # Deprecated? Replaced by run method?
+         logger.warning("process_query called - likely deprecated, use run() instead.")
+         # Simplified example: just run the main loop
+         return await self.run(query)
 
     async def generate_code_fix(self, query: str, code_snippets: List[Dict[str, Any]], error_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Generate a code fix based on the query, relevant code snippets, and optional error info"""
-        # This method might be refactored or called by the main `run` method.
-        # For simplicity, keeping it separate for now, but it duplicates some logic from _generate_code_fix
-        # Recommendation: Consolidate fix generation logic.
-        logger.warning("generate_code_fix method called - consider consolidating with _generate_code_fix or calling from run()")
-
-        if not self.provider:
-            return {"status": "error", "message": "LLM Provider not initialized."} 
-
-        try:
-            snippets_with_details = []
-            for snippet in code_snippets:
-                if snippet.get('code'): # Only process snippets with code
-                    code_lines = snippet['code'].split('\n')
-                    snippets_with_details.append({
-                        'code': snippet['code'],
-                        'file_path': snippet.get('file_path', 'unknown'),
-                        'language': snippet.get('language', 'unknown'),
-                        'similarity': snippet.get('similarity', 0),
-                        'start_line': 1,
-                        'end_line': len(code_lines)
-                    })
-
-            if not snippets_with_details:
-                 return {
-                     "status": "error",
-                     "message": "No valid code snippets provided to generate a fix."
-                 }
-
-            # Prepare context (simplified for this example)
-            context_limit = 2
-            relevant_snippets = sorted(snippets_with_details, key=lambda x: x['similarity'], reverse=True)[:context_limit]
-            context = "\n\n".join([
-                f"--- Code Snippet from {snippet['file_path']} ---\n{snippet['code']}"
-                for snippet in relevant_snippets
-            ])
-
-            error_context = ""
-            if error_info:
-                error_context = f"\n--- Error Info ---\nMessage: {error_info.get('message', 'N/A')}"
-
-            system_prompt = "You are an expert code assistant. Analyze the query, code, and error. Suggest a fix."
-            user_prompt = f"Query: {query}\n\nCode Context:\n{context}{error_context}\n\nSuggest a fix:"
-
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-
-            fix_suggestion_text = await self.generate_completion(messages)
-
-            return {
-                "status": "success",
-                "explanation": fix_suggestion_text,
-                "code_snippets_used": snippets_with_details
-            }
-
-        except Exception as e:
-            logger.error(f"Error in external generate_code_fix: {str(e)}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Error generating code fix: {str(e)}"
-            }
+        # This seems like a duplicate or older version of _generate_code_fix
+        logger.warning("generate_code_fix called - likely deprecated, use _generate_code_fix internally.")
+        # Combine context
+        analysis_context = "Error Info:\n" + json.dumps(error_info, indent=2) if error_info else "No specific error info provided."
+        return await self._generate_code_fix(query, code_snippets, analysis_context)
 
     async def analyze_code(self, code: str, original_query: Optional[str] = None) -> str:
-        """Analyze code snippets and provide insights, potentially considering the original query and its decomposition."""
         if not self.provider:
-            return "Error: LLM Provider not initialized."
-        try:
-            if not code or code.isspace():
-                logger.warning("analyze_code received empty or whitespace-only code.")
-                return "No code provided for analysis."
-
-            system_prompt = "You are an expert code analyst. Analyze the provided context which may include code snippets, search results, and query decomposition. Provide insights about functionality, structure, potential issues, and improvements related to the original user query."
+            logger.error("LLM Provider not available for code analysis.")
+            return "Error: LLM Provider not configured."
             
-            user_content = f"Please analyze the following context and provide insights related to the original user query.\n"
-            if original_query:
-                 user_content += f"\nOriginal User Query: {original_query}\n"
-            user_content += f"\nContext:\n```\n{code}\n```"
-            # Note: Decomposed queries are already part of the 'code' input string if added in the run method.
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": user_content
-                }
-            ]
-
-            response = await self.provider.generate_completion(messages)
-            return response.strip()
-
-        except Exception as e:
-            logger.error(f"Error analyzing code: {str(e)}", exc_info=True)
-            return f"Error occurred while analyzing the code: {str(e)}"
-
-    async def generate_test(self, code: str, test_type: str = "unit") -> Dict[str, Any]:
-        """Generate test cases for the given code"""
-        if not self.provider:
-            return {"status": "error", "message": "LLM Provider not initialized."}
+        system_prompt = "You are an expert code reviewer. Analyze the following code snippet(s) in the context of the user query, identify potential issues, suggest improvements, and explain the overall functionality."
+        user_prompt = f"User Query (optional context): {original_query}\n\nCode to Analyze:\n```\n{code}\n```\n\nPlease provide a concise analysis:"
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
         try:
-            if not code or code.isspace():
-                 return {"status": "error", "message": "Cannot generate tests for empty code."}
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": f"You are an expert in software testing, specializing in {test_type} tests. Generate comprehensive test cases for the provided code. Use standard testing libraries and practices for the likely language of the code."
-                },
-                {
-                    "role": "user",
-                    "content": f"Please generate {test_type} tests for this code:\n\n```\n{code}\n```\n\nInclude:\n1. Test cases covering main functionality\n2. Edge cases and error conditions (e.g., invalid inputs, boundary values)\n3. Clear test descriptions or function names\n4. Appropriate assertions to verify correct behavior. Only output the test code."
-                }
-            ]
-
-            test_code = await self.generate_completion(messages)
-
-            # Basic cleanup: remove potential markdown fences if the LLM included them
-            test_code = re.sub(r"^```(?:python|py)?\s*", "", test_code, flags=re.MULTILINE)
-            test_code = re.sub(r"\s*```$", "", test_code, flags=re.MULTILINE)
-
-            return {
-                "status": "success",
-                "test_code": test_code.strip()
-            }
-
+            analysis = await self.generate_completion(messages)
+            return analysis
         except Exception as e:
-            logger.error(f"Error generating test: {str(e)}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Error generating test: {str(e)}"
-            }
+            logger.error(f"Error during code analysis: {e}", exc_info=True)
+            return f"Error during analysis: {e}"
+            
+    async def generate_test(self, code: str, test_type: str = "unit") -> Dict[str, Any]:
+        if not self.provider:
+            return self._generate_error_response("LLM Provider not configured for test generation.")
+
+        system_prompt = f"You are a test generation expert. Generate a {test_type} test case for the given code. Respond ONLY in valid JSON format like {{\"test_code\": \"...\", \"explanation\": \"...\"}}. Ensure code is properly escaped."
+        user_prompt = f"Generate a {test_type} test for this code:\n```\n{code}\n```"
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        try:
+            response_text = await self.generate_completion(messages)
+            cleaned_response_text = self._clean_json_response(response_text)
+            test_details = json.loads(cleaned_response_text)
+            test_details["status"] = "success"
+            return test_details
+        except Exception as e:
+            logger.error(f"Error generating test: {e}", exc_info=True)
+            return self._generate_error_response(f"Failed to generate test: {e}")
 
     async def explain_code(self, code: str, language: str) -> str:
-        """Generate an explanation for a code snippet"""
         if not self.provider:
-             return "Error: LLM Provider not initialized."
+            return "Error: LLM Provider not configured."
+
+        system_prompt = "You are an expert code explainer. Provide a clear and concise explanation of the given code snippet."
+        user_prompt = f"Explain this {language} code:\n```\n{code}\n```"
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
         try:
-            if not code or code.isspace():
-                 return "No code provided for explanation."
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": f"You are an expert code assistant. Analyze the {language} code snippet and provide a clear, concise explanation of what it does, suitable for someone learning the language or encountering the code for the first time."
-                },
-                {
-                    "role": "user",
-                    "content": f"Please explain this {language} code snippet:\n\n```\n{code}\n```"
-                }
-            ]
-
             explanation = await self.generate_completion(messages)
-            return explanation.strip()
-
+            return explanation
         except Exception as e:
-            logger.error(f"Error generating explanation: {str(e)}", exc_info=True)
-            return f"Error generating explanation: {str(e)}"
+            logger.error(f"Error explaining code: {e}", exc_info=True)
+            return f"Error during explanation: {e}"
 
     async def run(self, query: str, conversation_history: Optional[list[Dict[str, str]]] = None) -> Dict[str, Any]:
-        """Run the agent's main workflow with a query and return results."""
-        start_time = time.time()
-        logger.info(f"Running agent workflow for query: '{query}'")
-        if conversation_history:
-            logger.info(f"Using conversation history with {len(conversation_history)} messages.")
-
-        # Refined Response Structure (UX-001)
-        response_data = {
-            # --- Core Status & Info --- #
-            "status": "processing",
-            "message": "Agent processing started.",
-            "query": query,
-            "clarification_needed": None,
-            
-            # --- Execution Details --- #
-            "initial_plan": [],
-            "metadata": {},
-
-            # --- Results (Populated during execution) --- #
-            "results": {
-                 "extracted_keywords": [],
-                 "decomposed_queries": [],
-                 "code_snippets": [],
-                 "web_search_results": None,
-                 "github_search_results": None,
-                 "stackoverflow_search_results": None,
-                 "analysis_summary": None,
-                 "fix_details": None,
-                 "apply_fix_status": None,
-                 "validation_status": None
-            }
-        }
-
-        # Timing and context setup
-        start_time = time.time()
-        execution_context = {
-            "query": query,
-            "extracted_keywords": [],
-            "decomposed_queries": [],
-            "code_snippets": [],
-            "analysis": None,
-            "web_search_results": None,
-            "github_results": None,
-            "stackoverflow_results": None,
-            "fix_details": None
-        }
+        logger.info(f"Starting agent run for query: '{query[:50]}...'")
+        response_data = {"results": {}, "status": "processing", "message": "Starting analysis..."}
+        execution_context = {"query": query, "conversation_history": conversation_history or []}
 
         try:
-            # --- 1. Reflection Phase --- #
-
-            # --- ENHANCE-007: Pre-fetch code context for clarity assessment --- #
-            preliminary_code_context_str = None
+            # 1. Reflection Phase (Clarity, Keywords, Decomposition, Plan)
+            logger.info("Phase 1: Reflection")
+            
+            # --- ENHANCE-007: Provide code context to Reflector --- 
+            # Perform a quick initial search to get potential context
+            initial_code_context = None
             try:
-                # Perform a quick search based on the raw query to get potential context
-                # Limit results and only use it for context, not primary results yet
-                context_search_limit = 3
-                logger.debug(f"Performing preliminary search for context (limit={context_search_limit}) for query: {query}")
-                # --- ENHANCE-008: Add filter to context search --- #
-                context_snippets = await self.vector_store_manager.search_code(
-                    query,
-                    limit=context_search_limit,
-                    filter_dict={"type": "code_master"} # Search only master code for context
-                )
-                # --- End ENHANCE-008 --- #
-                if context_snippets:
-                    # Extract file paths or other relevant info as context string
-                    context_files = list(set(s.get('file_path') for s in context_snippets if s.get('file_path')))
-                    if context_files:
-                        preliminary_code_context_str = f"Potentially relevant files based on query: {', '.join(context_files)}"
-                        logger.debug(f"Providing code context to clarity assessment: {preliminary_code_context_str}")
-            except Exception as context_search_e:
-                logger.warning(f"Failed to perform preliminary context search: {context_search_e}", exc_info=False)
-            # --- End ENHANCE-007 --- #
+                # Simple search using the raw query - remove top_k if not supported
+                initial_snippets = await self.vector_store_manager.search_code(query, filter_dict={"type": "code_master"})
+                if initial_snippets:
+                    # Provide file paths as context
+                    file_paths = list(set([snippet.get('file_path', 'unknown') for snippet in initial_snippets]))
+                    initial_code_context = f"Potentially relevant files found: {', '.join(file_paths)}"
+                    logger.info(f"Providing initial code context to Reflector: {initial_code_context}")
+            except Exception as search_err:
+                 logger.warning(f"Initial context search failed: {search_err}")
+            # --- End ENHANCE-007 --- 
 
-            # Assess clarity, passing the fetched code context
-            clarity_assessment = await self.reflector.assess_query_clarity(
-                query,
-                conversation_history,
-                code_context=preliminary_code_context_str # Pass the context
+            # --- Call individual reflection and planning steps ---
+            code_context_for_reflection = initial_code_context # Use the context found
+
+            clarity_result = await self.reflector.assess_query_clarity(
+                query=query,
+                conversation_history=execution_context["conversation_history"],
+                code_context=code_context_for_reflection
+            )
+            
+            is_clear = clarity_result == 'CLEAR'
+            clarification_question = None if is_clear else clarity_result
+            clarity_reason = None if is_clear else "Query assessed as ambiguous by Reflector." # Simplified reason
+
+            keywords = await self.reflector.extract_keywords(
+                query=query, 
+                conversation_history=execution_context["conversation_history"]
+            )
+            
+            decomposed_queries = await self.reflector.decompose_query(
+                query=query, 
+                conversation_history=execution_context["conversation_history"]
             )
 
-            if clarity_assessment != "CLEAR":
-                logger.info(f"Query assessed as potentially ambiguous. Assessment: {clarity_assessment}")
-                response_data["clarification_needed"] = clarity_assessment
+            # Use the planner to create the plan
+            plan = await self.planner.create_initial_plan(
+                query=query, 
+                extracted_keywords=keywords, 
+                decomposed_queries=decomposed_queries
+            )
+            
+            # --- Consolidate results ---
+            reflection_results = {
+                "is_clear": is_clear,
+                "clarity_reason": clarity_reason,
+                "clarification_question": clarification_question,
+                "keywords": keywords,
+                "decomposition": decomposed_queries,
+                "plan": plan
+            }
+            # --- End Reflector/Planner calls ---
+            
+            execution_context.update(reflection_results)
+            response_data["results"]["reflection"] = reflection_results # Include reflection details
+
+            if not is_clear: # Use the determined clarity flag
+                logger.warning(f"Query assessed as unclear: {clarity_reason}")
                 response_data["status"] = "clarification_needed"
-                if clarity_assessment == "NEEDS_DETAILS":
-                     response_data["message"] = "Your query seems a bit too general. Could you please provide more specific details about what you need?"
-                elif clarity_assessment == "AMBIGUOUS":
-                     response_data["message"] = "Your query could be interpreted in multiple ways. Could you please clarify your request?"
-                else:
-                     response_data["message"] = f"Your query needs clarification ({clarity_assessment}). Could you please rephrase or provide more context?"
-                end_time = time.time()
-                response_data["metadata"] = {
-                    "query": query,
-                    "duration_seconds": round(end_time - start_time, 2),
-                    "timestamp": datetime.now().isoformat(),
-                    "provider_used": self.provider.__class__.__name__ if self.provider else 'unknown',
-                    "workflow_completed_successfully": False 
-                }
-                logger.info(f"Returning early due to query ambiguity. Status: {response_data['status']}")
-                return response_data 
-            else:
-                 logger.info("Query assessed as clear.")
-                 response_data["clarification_needed"] = "Query assessed as clear."
+                response_data["message"] = clarification_question or "The query is unclear. Please provide more details."
+                return response_data # Return early for clarification
+                
+            if not plan: # Check if plan generation failed
+                 logger.error("Planner failed to generate a plan.")
+                 return self._generate_error_response("Failed to generate execution plan.")
+                 
+            # plan = reflection_results["plan"] # Plan is already assigned
+            logger.info(f"Generated Plan: {json.dumps(plan, indent=2)}")
 
-            # Populate results after reflection steps (keywords, decomposition)
-            extracted_keywords = await self.reflector.extract_keywords(query, conversation_history)
-            response_data["results"]["extracted_keywords"] = extracted_keywords
-            execution_context["extracted_keywords"] = extracted_keywords
-
-            decomposed_queries = await self.reflector.decompose_query(query, conversation_history)
-            response_data["results"]["decomposed_queries"] = decomposed_queries
-            execution_context["decomposed_queries"] = decomposed_queries
-
-            # --- Create Initial Plan --- #
-            initial_plan = await self.planner.create_initial_plan(query, extracted_keywords, decomposed_queries)
-            response_data["initial_plan"] = initial_plan
-            logger.info(f"Generated Plan: {initial_plan}")
-
-            # --- Plan Execution Phase (Delegated) --- #
-            if self.plan_executor:
-                await self.plan_executor.execute_plan(
-                    plan=initial_plan,
-                    execution_context=execution_context,
-                    response_data=response_data
-                )
-            else:
-                logger.error("PlanExecutor not initialized. Cannot execute plan.")
-                response_data["status"] = "error"
-                response_data["message"] = "Internal agent error: Plan executor failed to initialize."
-
-            # --- Plan Execution Finished --- #
-            # (Result consolidation might be handled within PlanExecutor or kept here)
-            # Example: Ensure analysis/fix details are present in response_data even if executor finished early
-            response_data["results"].setdefault("analysis_summary", execution_context.get("analysis", "Analysis step not reached or failed."))
-            response_data["results"].setdefault("fix_details", self._generate_error_response("Fix generation step not reached or failed."))
-
-            # --- 5. Post-Processing (Save Interaction) --- #
-            try:
-                final_fix_data = response_data["results"].get("fix_details")
-                if not isinstance(final_fix_data, dict): final_fix_data = {}
-
-                interaction_payload = {
-                    "query": query,
-                    "status": response_data.get("status"),
-                    "code_snippets": response_data["results"].get("code_snippets", []),
-                    "fix_status": final_fix_data.get("status"),
-                    "has_fix": bool(final_fix_data.get('fixed_code') or final_fix_data.get('changes')),
-                    "explanation": final_fix_data.get('explanation')
-                }
-                await self.vector_store_manager.save_interaction(interaction_payload)
-            except Exception as save_e:
-                 logger.error(f"Failed to save interaction via VectorStoreManager: {save_e}", exc_info=True)
+            # 2. Execution Phase (using PlanExecutor)
+            logger.info("Phase 2: Execution")
+            if not self.plan_executor:
+                 logger.error("PlanExecutor not initialized.")
+                 return self._generate_error_response("Internal Error: PlanExecutor not available.")
+                 
+            await self.plan_executor.execute_plan(plan, execution_context, response_data)
+            # execute_plan updates response_data directly
+            
+            # 3. Finalization/Saving (Optional)
+            logger.info("Phase 3: Finalization")
+            # Final status/message should be set by execute_plan
+            if response_data.get("status") == "processing": # Ensure a final status is set
+                 response_data["status"] = "completed"
+                 response_data["message"] = response_data.get("message", "Processing completed, but final status unclear.")
+                 
+            # await self._save_interaction(query, response_data) # Optionally save
 
         except Exception as e:
-            logger.error(f"Error during agent run workflow: {str(e)}", exc_info=True)
-            response_data["status"] = "error"
-            response_data["message"] = f"An error occurred while processing the query: {str(e)}"
-            # Ensure fix_details is present in case of early error
-            response_data["results"].setdefault("fix_details", self._generate_error_response(f"Workflow error occurred: {str(e)}"))
+            logger.critical(f"Critical error during agent run for query '{query}': {e}", exc_info=True)
+            # Return a standard error structure
+            response_data = self._generate_error_response(f"Agent run failed: {e}")
+            response_data["results"] = execution_context # Include context for debugging
 
-        finally:
-            end_time = time.time()
-            duration = end_time - start_time
-            # Determine workflow success based on final status
-            workflow_success = response_data.get("status") == "success"
-
-            response_data["metadata"] = {
-                "query": query,
-                "duration_seconds": round(duration, 2),
-                "timestamp": datetime.now().isoformat(),
-                "provider_used": self.provider.__class__.__name__ if self.provider else 'unknown',
-                "workflow_completed_successfully": workflow_success
-            }
-            logger.info(f"Agent run finished. Status: {response_data['status']}, Duration: {duration:.2f}s, Success: {workflow_success}")
-
+        logger.info(f"Agent run finished for query '{query[:50]}...' Status: {response_data.get('status')}")
         return response_data 
