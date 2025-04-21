@@ -1131,7 +1131,38 @@ STRICT RESPONSE RULES (REPEAT):
 
         try:
             # --- 1. Reflection Phase --- #
-            clarity_assessment = await self.reflector.assess_query_clarity(query, conversation_history)
+
+            # --- ENHANCE-007: Pre-fetch code context for clarity assessment --- #
+            preliminary_code_context_str = None
+            try:
+                # Perform a quick search based on the raw query to get potential context
+                # Limit results and only use it for context, not primary results yet
+                context_search_limit = 3
+                logger.debug(f"Performing preliminary search for context (limit={context_search_limit}) for query: {query}")
+                # --- ENHANCE-008: Add filter to context search --- #
+                context_snippets = await self.vector_store_manager.search_code(
+                    query,
+                    limit=context_search_limit,
+                    filter_dict={"type": "code_master"} # Search only master code for context
+                )
+                # --- End ENHANCE-008 --- #
+                if context_snippets:
+                    # Extract file paths or other relevant info as context string
+                    context_files = list(set(s.get('file_path') for s in context_snippets if s.get('file_path')))
+                    if context_files:
+                        preliminary_code_context_str = f"Potentially relevant files based on query: {', '.join(context_files)}"
+                        logger.debug(f"Providing code context to clarity assessment: {preliminary_code_context_str}")
+            except Exception as context_search_e:
+                logger.warning(f"Failed to perform preliminary context search: {context_search_e}", exc_info=False)
+            # --- End ENHANCE-007 --- #
+
+            # Assess clarity, passing the fetched code context
+            clarity_assessment = await self.reflector.assess_query_clarity(
+                query,
+                conversation_history,
+                code_context=preliminary_code_context_str # Pass the context
+            )
+
             if clarity_assessment != "CLEAR":
                 logger.info(f"Query assessed as potentially ambiguous. Assessment: {clarity_assessment}")
                 response_data["clarification_needed"] = clarity_assessment
@@ -1156,7 +1187,7 @@ STRICT RESPONSE RULES (REPEAT):
                  logger.info("Query assessed as clear.")
                  response_data["clarification_needed"] = "Query assessed as clear."
 
-            # Populate results after reflection steps
+            # Populate results after reflection steps (keywords, decomposition)
             extracted_keywords = await self.reflector.extract_keywords(query, conversation_history)
             response_data["results"]["extracted_keywords"] = extracted_keywords
             execution_context["extracted_keywords"] = extracted_keywords

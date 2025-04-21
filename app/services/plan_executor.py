@@ -49,10 +49,16 @@ class PlanExecutor:
                     use_keywords = step.get('use_keywords', True)
                     final_search_query = f"{search_query_param} {' '.join(execution_context['extracted_keywords'])}" if use_keywords else search_query_param
                     logger.info(f"Performing vector search with query: '{final_search_query}'")
-                    # Use self.agent to access components
-                    execution_context["code_snippets"] = await self.agent.vector_store_manager.search_code(final_search_query)
+                    # --- ENHANCE-008: Add filter to main search step --- #
+                    code_filter = {"type": "code_master"} # Default to searching master code
+                    # Optionally allow plan to override filter, e.g. step.get('filter', default_filter)
+                    execution_context["code_snippets"] = await self.agent.vector_store_manager.search_code(
+                        final_search_query,
+                        filter_dict=code_filter
+                    )
+                    # --- End ENHANCE-008 --- #
                     response_data["results"]["code_snippets"] = execution_context["code_snippets"]
-                    logger.info(f"Found {len(execution_context['code_snippets'])} snippets from vector store.")
+                    logger.info(f"Found {len(execution_context['code_snippets'])} snippets from vector store matching filter: {code_filter}")
                     if not execution_context["code_snippets"]:
                             logger.warning("No relevant code snippets found in vector store.")
                             

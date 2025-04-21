@@ -123,8 +123,40 @@
     "id": "ENHANCE-007",
     "area": "Agent Core Logic",
     "task": "Improve Reflector Query Clarity Assessment",
-    "description": "Modify the Reflector agent's assess_query_clarity method and prompts to better utilize conversation history and potentially available code context (e.g., from vector store) to reduce unnecessary requests for clarification, especially when the query refers to known code elements.",
+    "description": "Modify the Reflector agent's assess_query_clarity method and prompts to better utilize conversation history and potentially available code context (e.g., from vector store) to reduce unnecessary requests for clarification. Implement by performing a quick vector search in CodeAgent.run before calling assess_query_clarity and passing relevant code context (e.g., file paths) to the Reflector.",
     "priority": "High",
+    "status": "completed"
+  },
+  {
+    "id": "ENHANCE-008",
+    "area": "Data Management",
+    "task": "Filter Vector Store Search Results",
+    "description": "Modify VectorStoreManager.search_code to allow optional filtering based on metadata (e.g., payload['type']). This will prevent non-code items like 'interaction' records from appearing in searches specifically intended to retrieve code snippets for analysis or fixing.",
+    "priority": "Medium",
+    "status": "completed"
+  },
+  {
+    "id": "TOOL-001",
+    "area": "Tool Integration",
+    "task": "Implement Production-Ready Web Search Tool",
+    "description": "Replace the simulated web search in PlanExecutor with a real implementation. Choose a web search API (e.g., Tavily, Google Search API, Serper), integrate its client/library, handle API key configuration, and parse the results appropriately to feed into the agent's analysis context.",
+    "priority": "High",
+    "status": "todo"
+  },
+  {
+    "id": "TOOL-002",
+    "area": "Tool Integration",
+    "task": "Implement Production-Ready Apply Fix (File Edit) Capability",
+    "description": "Replace the simulated 'Apply Fix' step in PlanExecutor. Implement a mechanism to safely apply code changes suggested by the LLM. This could involve: 1) Defining a structured format for changes (e.g., diff format). 2) Implementing a function/tool that parses this format and modifies the target file. 3) Adding safeguards, potentially including user confirmation before applying changes or creating backups.",
+    "priority": "High",
+    "status": "todo"
+  },
+  {
+    "id": "TOOL-003",
+    "area": "Tool Integration",
+    "task": "Enhance External Search Providers (GitHub/Stack Overflow)",
+    "description": "Improve the robustness of GitHubSearchProvider and StackOverflowSearchProvider for production use. Implement comprehensive error handling (API errors, rate limits), support for pagination to retrieve more results if needed, and standardize API key/token configuration and usage.",
+    "priority": "Medium",
     "status": "todo"
   }
 ] 

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Callable, Awaitable, Optional
 
 from qdrant_client import QdrantClient, models
-from qdrant_client.http.models import Distance, VectorParams, PointStruct
+from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 # Assuming Config class might be needed or relevant parts passed.
 # from app.services.code_agent import Config 
 
@@ -71,38 +71,65 @@ class VectorStoreManager:
             logger.error(f"Error deleting Qdrant collection: {str(e)}", exc_info=True)
             # Don't necessarily raise, might be called during cleanup/reset
 
-    async def search_code(self, query: str, limit: int = 5) -> List[Dict]:
-        """Search for relevant code snippets based on the query embedding."""
+    async def search_code(self, query: str, limit: int = 5, filter_dict: Optional[Dict] = None) -> List[Dict]:
+        """Search for relevant code snippets based on the query embedding, with optional filtering.
+
+        Args:
+            query: The query string.
+            limit: Maximum number of results to return.
+            filter_dict: Optional dictionary specifying metadata filters.
+                         Example: {"type": "code_master"} to search only master code.
+                         Example: {"language": "python", "type": "code_snippet"}
+
+        Returns:
+            A list of dictionaries, each representing a found code snippet.
+        """
         try:
-            # Use the passed embedding function
             query_embedding = await self.embedding_func(query)
             
+            qdrant_filter = None
+            if filter_dict:
+                must_conditions = []
+                for key, value in filter_dict.items():
+                    # Qdrant recommends FieldCondition for exact matches on keyword/string fields
+                    must_conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
+                
+                if must_conditions:
+                    qdrant_filter = Filter(must=must_conditions)
+                    logger.debug(f"Applying Qdrant search filter: {filter_dict}")
+                else:
+                    logger.warning(f"Received filter_dict but could not build valid conditions: {filter_dict}")
+
             results = self.qdrant_client.search(
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
+                query_filter=qdrant_filter, # <-- Use the filter
                 limit=limit
             )
             
             processed_results = []
             for match in results:
                 payload = match.payload
-                if payload and payload.get('code') is not None:
+                # Keep the check for non-empty payload, but the primary filtering is done by Qdrant now
+                if payload:
                     processed_results.append({
                         'code': payload.get('code', ''),
                         'file_path': payload.get('file_path', ''),
                         'language': payload.get('language', 'unknown'),
+                        'type': payload.get('type', 'unknown'), # Include type in result
                         'similarity': match.score,
-                        'id': match.id, # Include ID for reference
-                        'timestamp': payload.get('timestamp') # Include timestamp
+                        'id': match.id,
+                        'timestamp': payload.get('timestamp')
                     })
                 else:
-                     logger.warning(f"Skipping Qdrant result with missing/empty code payload: ID {match.id}")
+                     logger.warning(f"Skipping Qdrant result with empty payload: ID {match.id}")
 
+            logger.info(f"Search completed. Found {len(processed_results)} results matching filter: {filter_dict}")
             return processed_results
             
         except Exception as e:
             logger.error(f"Error searching code in Qdrant: {str(e)}", exc_info=True)
-            return [] # Return empty list on error
+            return []
 
     async def index_code(self, code: str, metadata: Dict) -> Optional[str]:
         """Index a code snippet with its embedding. Returns the point ID if successful."""
