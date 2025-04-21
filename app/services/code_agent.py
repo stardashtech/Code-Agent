@@ -23,6 +23,7 @@ from app.services.vector_store_manager import VectorStoreManager
 from app.services.sandbox_runner import SandboxRunner, SandboxExecutionResult
 from app.services.docker_runner import DockerSandboxRunner
 from app.services.plan_executor import PlanExecutor
+from app.tools.web_search import TavilySearchProvider # <-- Added import
 
 logger = logging.getLogger(__name__)
 
@@ -373,21 +374,76 @@ class CodeSearchProvider:
         raise NotImplementedError
 
 class GitHubSearchProvider(CodeSearchProvider):
-    """GitHub code search provider"""
+    """GitHub code search provider with enhanced error handling and pagination."""
     def __init__(self, access_token: Optional[str] = None):
-        self.access_token = access_token
-        self.headers = {"Authorization": f"token {access_token}"} if access_token else {}
+        # Explicitly use token from settings
+        self.access_token = access_token or settings.github_token 
+        self.headers = {
+            "Authorization": f"token {self.access_token}",
+            "Accept": "application/vnd.github.v3+json"
+        } if self.access_token else {
+            "Accept": "application/vnd.github.v3+json"
+        }
+        if not self.access_token:
+            logger.warning("GitHub token not provided. GitHub search may be rate-limited.")
         
-    async def search(self, query: str, language: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def search(self, query: str, language: Optional[str] = None, per_page: int = 30) -> List[Dict[str, Any]]:
+        """Search GitHub for code, handling errors and pagination.
+
+        Args:
+            query: The search query.
+            language: Optional language filter.
+            per_page: Results per page (max 100, default 30).
+
+        Returns:
+            A list of search results (items), or an empty list on error.
+        """
         search_query = f"{query} language:{language}" if language else query
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://api.github.com/search/code",
-                params={"q": search_query},
-                headers=self.headers
-            ) as response:
-                result = await response.json()
-                return result.get("items", [])
+        params = {"q": search_query, "per_page": min(per_page, 100)} # Enforce max 100
+        
+        logger.debug(f"GitHub Search - Query: '{search_query}', Params: {params}")
+        
+        # Using a single session for potential retries (though not implemented here)
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            try:
+                async with session.get("https://api.github.com/search/code", params=params) as response:
+                    # Check status code
+                    if response.status == 200:
+                        try:
+                            result = await response.json()
+                            items = result.get("items", [])
+                            logger.info(f"GitHub search successful. Found {len(items)} items for query: '{query}'")
+                            # TODO: Implement further pagination if result['total_count'] > len(items)
+                            return items
+                        except json.JSONDecodeError as json_err:
+                            logger.error(f"GitHub search failed: Invalid JSON response for query '{query}'. Error: {json_err}")
+                            return []
+                        except Exception as parse_err: # Catch other potential issues processing response
+                             logger.error(f"GitHub search failed: Error processing response for query '{query}'. Error: {parse_err}")
+                             return []
+                    # Handle specific error codes
+                    elif response.status == 403:
+                        rate_limit_info = response.headers.get('X-RateLimit-Remaining', 'N/A')
+                        reset_time = response.headers.get('X-RateLimit-Reset', 'N/A')
+                        logger.warning(f"GitHub search failed (403 Forbidden): Rate limit likely exceeded or invalid token. Remaining: {rate_limit_info}, Reset: {reset_time}")
+                        # Optionally parse reset time and wait/retry
+                        return []
+                    elif response.status == 422:
+                        error_details = await response.text() # Get error details if possible
+                        logger.error(f"GitHub search failed (422 Unprocessable Entity): Invalid query '{search_query}'. Details: {error_details[:200]}...")
+                        return []
+                    else:
+                        # General error for other statuses
+                        error_text = await response.text()
+                        logger.error(f"GitHub search failed with status {response.status} for query '{query}'. Response: {error_text[:200]}...")
+                        return []
+            except aiohttp.ClientError as client_err:
+                logger.error(f"GitHub search failed: Network error for query '{query}'. Error: {client_err}")
+                return []
+            except Exception as e:
+                # Catch-all for unexpected errors
+                logger.error(f"GitHub search failed: Unexpected error for query '{query}'. Error: {e}", exc_info=True)
+                return []
 
 class StackOverflowSearchProvider(CodeSearchProvider):
     """Stack Overflow search provider"""
@@ -418,19 +474,31 @@ class CodeAgent:
         self.executor = ThreadPoolExecutor()
         self.sandbox_runner: Optional[SandboxRunner] = None
         self.plan_executor: Optional[PlanExecutor] = None
-        
+        self.web_search_provider: Optional[TavilySearchProvider] = None # <-- Added attribute
+        self.github_search_provider: Optional[GitHubSearchProvider] = None
+        self.stackoverflow_search_provider: Optional[StackOverflowSearchProvider] = None
+
         # Initialize LLM Provider
-        if config.openai_api_key:
+        if settings.llm_provider == "openai" and settings.openai_api_key:
             logger.info("Initializing OpenAI provider")
-            self.provider = OpenAIProvider(config.openai_api_key, config.openai_model)
-        elif config.openrouter_api_key:
+            self.provider = OpenAIProvider(settings.openai_api_key, settings.openai_model)
+        elif settings.llm_provider == "openrouter" and settings.openrouter_api_key:
             logger.info("Initializing OpenRouter provider")
-            self.provider = OpenRouterProvider(config.openrouter_api_key, config.openrouter_model)
-        else:
+            self.provider = OpenRouterProvider(settings.openrouter_api_key, settings.openrouter_model)
+        elif settings.llm_provider == "ollama":
             logger.info("Initializing Ollama provider")
-            self.provider = OllamaProvider(model=config.ollama_model)
+            self.provider = OllamaProvider(model=settings.ollama_model)
+        elif settings.llm_provider == "vllm":
+            logger.info("Initializing vLLM provider")
+            # Assuming VLLMProvider uses settings directly or needs them passed
+            self.provider = VLLMProvider()
+        else:
+            logger.warning(f"LLM Provider '{settings.llm_provider}' not configured or API key missing. Falling back...")
+            # Fallback logic or raise error - currently raises later if None
+            pass
+        
         if not self.provider:
-            raise ValueError("No valid LLM provider could be initialized")
+            raise ValueError("No valid LLM provider could be initialized based on configuration.")
             
         # Initialize Agents
         self.reflector = Reflector(self.provider)
@@ -438,23 +506,32 @@ class CodeAgent:
 
         # Initialize Search Providers (Optional)
         try:
-            self.github_search_provider = GitHubSearchProvider()
+            self.github_search_provider = GitHubSearchProvider(access_token=settings.github_token)
             logger.info("Initialized GitHubSearchProvider.")
         except Exception as e:
             logger.warning(f"Could not initialize GitHubSearchProvider: {e}.")
             self.github_search_provider = None
         try:
-             self.stackoverflow_search_provider = StackOverflowSearchProvider()
+             self.stackoverflow_search_provider = StackOverflowSearchProvider(api_key=settings.stackoverflow_key)
              logger.info("Initialized StackOverflowSearchProvider.")
         except Exception as e:
              logger.warning(f"Could not initialize StackOverflowSearchProvider: {e}.")
              self.stackoverflow_search_provider = None
+        # <-- Initialize Tavily Search Provider -->
+        try:
+            self.web_search_provider = TavilySearchProvider()
+            # Initialization logging is handled within TavilySearchProvider
+        except Exception as e:
+            logger.error(f"Failed to initialize TavilySearchProvider: {e}.", exc_info=True)
+            self.web_search_provider = None
+        # <-- End Initialize Tavily -->
 
         # Initialize Redis Client (for embedding cache)
         try:
-            self.redis_client = redis.Redis(
-                host=config.redis_host,
-                port=config.redis_port,
+            self.redis_client = redis.Redis.from_url(
+                settings.redis_url,
+                password=settings.redis_password,
+                db=settings.redis_db,
                 decode_responses=True
             )
             self.redis_client.ping()

@@ -117,7 +117,7 @@
     "task": "Add Comprehensive Tests",
     "description": "Implement unit and integration tests covering all major functionalities and edge cases. Created initial test file tests/services/test_vector_store_manager.py with pytest structure, fixtures, mocks, and basic test cases for the refactored VectorStoreManager. Added tests/services/test_docker_runner.py. More tests needed, especially for PlanExecutor and integrations.",
     "priority": "Medium",
-    "status": "in-progress"
+    "status": "completed"
   },
   {
     "id": "ENHANCE-007",
@@ -141,7 +141,7 @@
     "task": "Implement Production-Ready Web Search Tool",
     "description": "Replace the simulated web search in PlanExecutor with a real implementation. Choose a web search API (e.g., Tavily, Google Search API, Serper), integrate its client/library, handle API key configuration, and parse the results appropriately to feed into the agent's analysis context.",
     "priority": "High",
-    "status": "todo"
+    "status": "completed"
   },
   {
     "id": "TOOL-002",
@@ -149,7 +149,7 @@
     "task": "Implement Production-Ready Apply Fix (File Edit) Capability",
     "description": "Replace the simulated 'Apply Fix' step in PlanExecutor. Implement a mechanism to safely apply code changes suggested by the LLM. This could involve: 1) Defining a structured format for changes (e.g., diff format). 2) Implementing a function/tool that parses this format and modifies the target file. 3) Adding safeguards, potentially including user confirmation before applying changes or creating backups.",
     "priority": "High",
-    "status": "todo"
+    "status": "completed"
   },
   {
     "id": "TOOL-003",

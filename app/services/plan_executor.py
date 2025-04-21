@@ -1,4 +1,6 @@
 import logging
+import os
+import shutil
 from typing import TYPE_CHECKING, Any, Dict, List
 
 # Use TYPE_CHECKING to avoid circular import issues
@@ -64,19 +66,23 @@ class PlanExecutor:
                             
                 elif step_name == "Web Search":
                     web_query = step.get('query', query)
+                    max_results = step.get('max_results', 5) # Allow plan to specify max results
                     logger.info(f"Performing web search with query: '{web_query}'")
-                    try:
-                        if hasattr(self.agent, 'web_search'):
-                                search_result = await self.agent.web_search(web_query)
-                                execution_context["web_search_results"] = search_result
-                                logger.info(f"Web search completed. Found {len(search_result)} results.")
-                        else:
-                                logger.warning("Web search tool call mechanism not implemented. Skipping actual search.")
-                                execution_context["web_search_results"] = [{"title": "Tool Call Skipped", "snippet": "Web search tool call mechanism not implemented."}]
-                                
-                    except Exception as tool_e:
-                            logger.error(f"Error during web search tool call: {tool_e}", exc_info=True)
-                            execution_context["web_search_results"] = [{"title": "Error", "snippet": f"Web search failed: {tool_e}"}]
+                    
+                    if self.agent.web_search_provider and self.agent.web_search_provider.client:
+                        try:
+                            search_result = await self.agent.web_search_provider.search(
+                                web_query,
+                                max_results=max_results
+                            )
+                            execution_context["web_search_results"] = search_result
+                            logger.info(f"Web search completed via {self.agent.web_search_provider.__class__.__name__}. Found {len(search_result)} results.")
+                        except Exception as tool_e:
+                            logger.error(f"Error during web search via {self.agent.web_search_provider.__class__.__name__}: {tool_e}", exc_info=True)
+                            execution_context["web_search_results"] = [{"title": "Error", "content": f"Web search failed: {tool_e}"}]
+                    else:
+                        logger.warning("Web search provider not available or not initialized. Skipping web search step.")
+                        execution_context["web_search_results"] = [{"title": "Skipped", "content": "Web search provider not configured or failed to initialize."}]
                             
                     response_data["results"]["web_search_results"] = execution_context["web_search_results"]
 
@@ -197,50 +203,67 @@ class PlanExecutor:
                 elif step_name == "Apply Fix":
                     logger.info("Attempting to apply generated fix...")
                     fix_details = response_data["results"].get("fix_details")
+                    apply_fix_status = {}
                     
                     if not fix_details or fix_details.get('status') == 'error':
                         logger.warning("Skipping Apply Fix: No valid fix details available.")
-                        response_data["results"]["apply_fix_status"] = {"status": "skipped", "reason": "No valid fix details"}
-                        continue
+                        apply_fix_status = {"status": "skipped", "reason": "No valid fix details"}
+                    else:
+                        target_file = fix_details.get('file_path')
+                        fixed_code = fix_details.get('fixed_code')
 
-                    target_file = fix_details.get('file_path')
-                    fixed_code = fix_details.get('fixed_code')
-                    changes = fix_details.get('changes') # List of specific changes
+                        if not target_file:
+                            logger.warning("Skipping Apply Fix: Target file path not specified in fix details.")
+                            apply_fix_status = {"status": "skipped", "reason": "Target file not specified"}
+                        elif not fixed_code:
+                            # We are prioritizing fixed_code for now, ignoring changes array implementation
+                            logger.warning("Skipping Apply Fix: 'fixed_code' not provided in fix details.")
+                            apply_fix_status = {"status": "skipped", "reason": "No fixed_code provided"}
+                        else:
+                            # Basic path safety check: prevent absolute paths or attempts to go outside current dir structure
+                            # This is NOT foolproof security, but a basic safeguard.
+                            if os.path.isabs(target_file) or ".." in target_file:
+                                logger.error(f"Security Risk: Apply fix blocked for potentially unsafe path: {target_file}")
+                                apply_fix_status = {"status": "error", "file": target_file, "error": "Attempted to write to potentially unsafe path."}
+                            else:
+                                backup_file = f"{target_file}.bak"
+                                try:
+                                    # Create backup
+                                    if os.path.exists(target_file):
+                                        shutil.copy2(target_file, backup_file)
+                                        logger.info(f"Created backup of {target_file} at {backup_file}")
+                                    else:
+                                        logger.warning(f"Target file {target_file} does not exist. Applying fix will create it.")
+                                        backup_file = None # No backup created if file didn't exist
+                                        
+                                    # Ensure directory exists
+                                    target_dir = os.path.dirname(target_file)
+                                    if target_dir and not os.path.exists(target_dir):
+                                        os.makedirs(target_dir)
+                                        logger.info(f"Created directory {target_dir}")
 
-                    if not target_file:
-                        logger.warning("Skipping Apply Fix: Target file path not specified in fix details.")
-                        response_data["results"]["apply_fix_status"] = {"status": "skipped", "reason": "Target file not specified"}
-                        continue
-                        
-                    if not fixed_code and not changes:
-                            logger.warning("Skipping Apply Fix: Neither 'fixed_code' nor 'changes' provided in fix details.")
-                            response_data["results"]["apply_fix_status"] = {"status": "skipped", "reason": "No code/changes provided"}
-                            continue
-                            
-                    # --- Actual edit_file Tool Call (Placeholder/Simulation) --- #
-                    # TODO: Replace with actual tool call mechanism if available
-                    edit_applied = False
-                    edit_error = None
-                    
-                    if fixed_code:
-                            code_edit_content = fixed_code
-                            edit_instruction = f"Apply the generated code fix to {target_file}."
-                            
-                            try:
-                                # Simulate success for now
-                                edit_result = {"status": "simulated_success", "message": f"Simulated edit applied to {target_file}"}
-                                logger.info(f"Simulated edit_file tool call successful for {target_file}. Result: {edit_result}")
-                                edit_applied = True 
-                                response_data["results"]["apply_fix_status"] = {"status": "success", "file": target_file, "message": edit_result.get("message")}
-                                
-                            except Exception as edit_e:
-                                logger.error(f"Error calling edit_file tool for {target_file}: {edit_e}", exc_info=True)
-                                edit_error = str(edit_e)
-                                response_data["results"]["apply_fix_status"] = {"status": "error", "file": target_file, "error": edit_error}
-                                
-                    elif changes:
-                        logger.warning(f"Apply Fix with 'changes' array not yet implemented. Skipping edit for {target_file}.")
-                        response_data["results"]["apply_fix_status"] = {"status": "skipped", "file": target_file, "reason": "'changes' based edit not implemented"}
+                                    # Write the fixed code
+                                    with open(target_file, 'w', encoding='utf-8') as f:
+                                        f.write(fixed_code)
+                                    
+                                    logger.info(f"Successfully applied fix to {target_file}")
+                                    apply_fix_status = {
+                                        "status": "success", 
+                                        "file": target_file, 
+                                        "backup_created": backup_file
+                                    }
+
+                                except IOError as io_err:
+                                    logger.error(f"IOError applying fix to {target_file}: {io_err}", exc_info=True)
+                                    apply_fix_status = {"status": "error", "file": target_file, "error": f"File write error: {io_err}"}
+                                except OSError as os_err:
+                                    logger.error(f"OSError applying fix to {target_file} (e.g., backup failed): {os_err}", exc_info=True)
+                                    apply_fix_status = {"status": "error", "file": target_file, "error": f"OS error during apply fix: {os_err}"}
+                                except Exception as e:
+                                    logger.error(f"Unexpected error applying fix to {target_file}: {e}", exc_info=True)
+                                    apply_fix_status = {"status": "error", "file": target_file, "error": f"Unexpected error: {e}"}
+
+                    response_data["results"]["apply_fix_status"] = apply_fix_status
 
                 elif step_name == "Validate Code (Sandbox)":
                     logger.info("Attempting to validate generated code in sandbox...")

@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # Stack Overflow Configuration
     stackoverflow_key: Optional[str] = None
     
+    # Tavily Search Configuration
+    tavily_api_key: Optional[str] = "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"
+    
     # Qdrant Configuration
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: Optional[str] = None
