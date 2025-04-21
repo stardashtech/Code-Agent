@@ -43,35 +43,55 @@ class GitHubSearchProvider(CodeSearchProvider):
         async with aiohttp.ClientSession(headers=self.headers) as session:
             try:
                 async with session.get("https://api.github.com/search/code", params=params) as response:
+                    response_body_text = await response.text() # Read body once for potential use in logs
+                    logger.debug(f"GitHub API Response Status: {response.status}")
+                    logger.debug(f"GitHub API Response Headers: {response.headers}")
+                    
                     # Check status code
                     if response.status == 200:
                         try:
-                            result = await response.json()
+                            # Attempt to parse the already read text
+                            result = json.loads(response_body_text)
                             items = result.get("items", [])
-                            logger.info(f"GitHub search successful. Found {len(items)} items for query: '{query}'")
-                            # TODO: Implement further pagination if result['total_count'] > len(items)
+                            total_count = result.get("total_count", 0)
+                            incomplete_results = result.get("incomplete_results", False)
+                            logger.info(f"GitHub search successful. Found {len(items)} items out of {total_count} total for query: '{query}'. Incomplete: {incomplete_results}")
+                            
+                            # Log if more results might be available (Pagination TODO)
+                            if total_count > len(items):
+                                logger.info(f"More results available ({total_count} total). Pagination not implemented.")
+                                
                             return items
                         except json.JSONDecodeError as json_err:
-                            logger.error(f"GitHub search failed: Invalid JSON response for query '{query}'. Error: {json_err}")
+                            logger.error(f"GitHub search failed: Invalid JSON response for query '{query}'. Status: {response.status}. Error: {json_err}. Response Body: {response_body_text[:500]}...")
                             return []
                         except Exception as parse_err: # Catch other potential issues processing response
-                             logger.error(f"GitHub search failed: Error processing response for query '{query}'. Error: {parse_err}")
+                             logger.error(f"GitHub search failed: Error processing successful response for query '{query}'. Status: {response.status}. Error: {parse_err}")
                              return []
                     # Handle specific error codes
                     elif response.status == 403:
                         rate_limit_info = response.headers.get('X-RateLimit-Remaining', 'N/A')
                         reset_time = response.headers.get('X-RateLimit-Reset', 'N/A')
-                        logger.warning(f"GitHub search failed (403 Forbidden): Rate limit likely exceeded or invalid token. Remaining: {rate_limit_info}, Reset: {reset_time}")
+                        # Try parsing the body for more detailed error message
+                        error_message = "Forbidden"
+                        try:
+                            error_data = json.loads(response_body_text)
+                            error_message = error_data.get('message', error_message)
+                        except json.JSONDecodeError:
+                            pass # Keep default message if body is not JSON
+                        logger.warning(
+                            f"GitHub search failed (403 Forbidden): {error_message}. "
+                            f"Rate limit likely exceeded or invalid token. Remaining: {rate_limit_info}, Reset Timestamp: {reset_time}. "
+                            f"Response Body: {response_body_text[:500]}..."
+                        )
                         # Optionally parse reset time and wait/retry
                         return []
                     elif response.status == 422:
-                        error_details = await response.text() # Get error details if possible
-                        logger.error(f"GitHub search failed (422 Unprocessable Entity): Invalid query '{search_query}'. Details: {error_details[:200]}...")
+                        logger.error(f"GitHub search failed (422 Unprocessable Entity): Invalid query '{search_query}'. Details: {response_body_text[:500]}...")
                         return []
                     else:
                         # General error for other statuses
-                        error_text = await response.text()
-                        logger.error(f"GitHub search failed with status {response.status} for query '{query}'. Response: {error_text[:200]}...")
+                        logger.error(f"GitHub search failed with status {response.status} for query '{query}'. Response: {response_body_text[:500]}...")
                         return []
             except aiohttp.ClientError as client_err:
                 logger.error(f"GitHub search failed: Network error for query '{query}'. Error: {client_err}")

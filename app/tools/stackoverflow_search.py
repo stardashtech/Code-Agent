@@ -32,26 +32,52 @@ class StackOverflowSearchProvider(CodeSearchProvider):
         
         logger.debug(f"Stack Overflow Search - Params: {filtered_params}")
 
-        # Basic implementation without error handling or pagination (as before)
-        # Needs significant enhancement for TOOL-003
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     "https://api.stackexchange.com/2.3/search/advanced",
                     params=filtered_params
                 ) as response:
+                    response_body_text = await response.text() # Read body once
+                    logger.debug(f"Stack Overflow API Response Status: {response.status}")
+
                     if response.status == 200:
                         try:
-                            result = await response.json()
-                            # TODO: Check 'quota_remaining', 'has_more' for pagination/rate limits
-                            # TODO: Handle API errors within the JSON response (e.g., error_id)
-                            return result.get("items", [])
+                            result = json.loads(response_body_text)
+                            
+                            # Check for API errors within the JSON response
+                            if 'error_id' in result:
+                                error_name = result.get('error_name', 'UnknownError')
+                                error_message = result.get('error_message', 'No details provided.')
+                                logger.error(
+                                    f"Stack Overflow API returned an error: "
+                                    f"ID={result['error_id']}, Name={error_name}, Message='{error_message}'"
+                                )
+                                return [] # Return empty on API error
+
+                            items = result.get("items", [])
+                            has_more = result.get("has_more", False)
+                            quota_remaining = result.get("quota_remaining", "N/A")
+                            quota_max = result.get("quota_max", "N/A")
+                            
+                            logger.info(
+                                f"Stack Overflow search successful. Found {len(items)} items. "
+                                f"Quota: {quota_remaining}/{quota_max}. Has More: {has_more}"
+                            )
+
+                            if has_more:
+                                logger.info("More Stack Overflow results available. Pagination not implemented.")
+                                
+                            return items
+                            
                         except json.JSONDecodeError as json_err:
-                             logger.error(f"Stack Overflow search failed: Invalid JSON response. Error: {json_err}")
+                             logger.error(f"Stack Overflow search failed: Invalid JSON response. Status: {response.status}. Error: {json_err}. Response Body: {response_body_text[:500]}...")
+                             return []
+                        except Exception as parse_err:
+                             logger.error(f"Stack Overflow search failed: Error processing successful response. Status: {response.status}. Error: {parse_err}")
                              return []
                     else:
-                        error_text = await response.text()
-                        logger.error(f"Stack Overflow search failed with status {response.status}. Response: {error_text[:200]}...")
+                        logger.error(f"Stack Overflow search failed with status {response.status}. Response: {response_body_text[:500]}...")
                         return []
         except aiohttp.ClientError as client_err:
             logger.error(f"Stack Overflow search failed: Network error. Error: {client_err}")
