@@ -130,8 +130,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 💬 Community & Support
 
-*   **Issues:** Report bugs or suggest features via [GitHub Issues](https://github.com/your-username/your-repo/issues).
-*   **Discussions:** Join the conversation on [GitHub Discussions](https://github.com/your-username/your-repo/discussions) (if enabled).
+*   **Issues:** Report bugs or suggest features via [GitHub Issues](https://github.com/stardashtech/Code-Agent/issues).
 *   **(Optional):** Add links to Discord, Slack, mailing lists, etc.
 
 ---

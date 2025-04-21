@@ -1,159 +1,202 @@
-{
-  "Query Optimization (Reflection Phase) Enhancements": [
-    {
-      "id": "reflection_1",
-      "task": "Query Clarification",
-      "description": "If the initial query is ambiguous or incomplete, the agent should proactively ask the user for clarification before proceeding to the planning phase. This involves using an LLM to detect ambiguity and generating a targeted question. Example: For 'How to do routing?', ask 'For which web framework (Flask, Django, FastAPI, etc.) or context (web server, microservices) are you asking about routing?'. This leads to more accurate planning and targeted actions.",
-      "related_files": ["app/agents/reflector.py", "app/main.py", "app/api/endpoints.py"],
-      "status": "completed"
-    },
-    {
-      "id": "reflection_2",
-      "task": "Keyword/Concept Extraction and Expansion",
-      "description": "Utilize an LLM or specific NLP techniques (like NER - Named Entity Recognition) to identify core concepts, keywords, potential synonyms, and related terms within the user query. This extracted information should be used to enrich subsequent web searches or tool invocations, making them more effective.",
-      "related_files": ["app/utils/nlp.py", "app/agents/reflector.py", "app/services/code_agent.py"],
-      "status": "completed"
-    },
-    {
-      "id": "reflection_3",
-      "task": "Contextual Enrichment",
-      "description": "Leverage conversation history or user-provided context (e.g., project type, programming language being used) to make the query more specific. This might involve retrieving previous messages or accessing a dedicated context store (like Redis).",
-      "related_files": ["app/services/code_agent.py", "app/agents/reflector.py", "app/services/context_manager.py"],
-      "status": "completed"
-    },
-    {
-      "id": "reflection_4",
-      "task": "Query Decomposition",
-      "description": "Break down complex or multi-step queries into smaller, manageable sub-queries. This can be done via an LLM call. The agent can then plan and act upon each sub-query individually or sequentially, simplifying the planning process.",
-      "related_files": ["app/agents/reflector.py"],
-      "status": "completed"
-    }
-  ],
-  "System Planning (Planning Phase) Enhancements": [
-    {
-      "id": "planning_1",
-      "task": "Dynamic and Adaptive Planning",
-      "description": "Allow the agent to revise or completely replan based on feedback from the action phase (e.g., failed web search, unexpected tool output). The initial plan might be based on assumptions; the ability to adapt makes the process more robust and flexible. Implement mechanisms for the planner to receive action results and trigger re-planning.",
-      "related_files": ["app/agents/planner.py", "app/agents/actioner.py", "app/workflow_manager.py"],
-      "status": "completed"
-    },
-    {
-      "id": "planning_2",
-      "task": "Strategic Tool Selection",
-      "description": "Instead of defaulting to a single tool (like web search), consider a broader toolkit (codebase search via `search_code`, code analysis via `analyze_code`, specific documentation site scrapers, GitHub API interaction, Stack Overflow search). The planner should strategically select the most appropriate tool(s) for the current query or plan step, potentially using multiple tools sequentially or in parallel based on a scoring system or LLM decision.",
-      "related_files": ["app/agents/planner.py", "app/services/code_agent.py", "app/tools/"],
-      "status": "completed"
-    },
-    {
-      "id": "planning_3",
-      "task": "Contingency Planning",
-      "description": "Incorporate fallback steps or alternative approaches into the plan structure. If the primary action fails (e.g., web search yields no relevant results), the plan should define what to try next (e.g., search a specific documentation site, search GitHub repositories with different keywords).",
-      "related_files": ["app/agents/planner.py"],
-      "status": "completed"
-    },
-    {
-      "id": "planning_4",
-      "task": "Plan Validation and Refinement",
-      "description": "Before execution, have the agent (or another LLM instance) review the generated plan for coherence, feasibility, and completeness. This step can assign a 'quality' or 'confidence' score to the plan and potentially trigger refinement if issues are detected.",
-      "related_files": ["app/agents/planner.py"],
-      "status": "skipped_for_mvp"
-    },
-    {
-      "id": "planning_5",
-      "task": "Hierarchical Planning",
-      "description": "For highly complex tasks, implement hierarchical planning. Create a high-level plan first, then break down each high-level step into more detailed sub-plans or sub-tasks. This involves creating nested plan structures.",
-      "related_files": ["app/agents/planner.py"],
-      "status": "skipped_for_mvp"
-    }
-  ],
-  "Action and Information Gathering (Action Phase) Enhancements": [
-    {
-      "id": "action_1",
-      "task": "Targeted Information Gathering",
-      "description": "Employ specific strategies instead of generic web searches. Configure tool calls with precise parameters: search official documentation sites (e.g., python.org), search specific code repositories (GitHub) using relevant keywords or code patterns, query Q&A sites (Stack Overflow) with specific tags, or utilize specialized code search engines/APIs if available.",
-      "related_files": ["app/agents/actioner.py", "app/tools/web_search.py", "app/tools/github_search.py", "app/tools/stackoverflow_search.py"],
-      "status": "completed"
-    },
-    {
-      "id": "action_2",
-      "task": "Result Filtering, Ranking, and Evaluation",
-      "description": "Implement mechanisms to process search results. Filter results based on relevance, timeliness, source credibility (official docs > blog > forum), and potentially code quality (using heuristics or linters). Rank the filtered results before passing them to the next stage.",
-      "related_files": ["app/agents/actioner.py", "app/utils/result_processor.py"],
-      "status": "completed"
-    },
-    {
-      "id": "action_3",
-      "task": "Information Extraction",
-      "description": "Instead of passing entire documents, intelligently extract the most relevant snippets, code examples, API signatures, or explanations from the retrieved sources. Use targeted LLM prompts for summarization or specific data extraction based on the query.",
-      "related_files": ["app/agents/actioner.py", "app/utils/result_processor.py", "app/services/code_agent.py"],
-      "status": "skipped_for_mvp"
-    },
-    {
-      "id": "action_4",
-      "task": "Caching",
-      "description": "Implement caching for tool call results (web searches, API calls) based on the query or specific plan step parameters. Use a caching mechanism like Redis (potentially integrating with the existing client in `CodeAgent`) to improve efficiency and reduce redundant calls/costs for similar requests.",
-      "related_files": ["app/services/code_agent.py", "app/agents/actioner.py", "app/tools/"],
-      "status": "completed"
-    }
-  ],
-  "Output Generation (Integration Phase) Enhancements": [
-    {
-      "id": "integration_1",
-      "task": "Synthesis and Integration",
-      "description": "Don't just present raw retrieved information. Synthesize insights from multiple sources, identify consensus or contradictions, and provide a coherent, integrated response. Use an LLM prompted with the original query and the extracted information from various sources.",
-      "related_files": ["app/agents/output_generator.py", "app/services/code_agent.py"],
-      "status": "completed"
-    },
-    {
-      "id": "integration_2",
-      "task": "Code Adaptation and Validation",
-      "description": "If code examples are retrieved, adapt them to the user's specific query context or existing codebase (if provided). Ensure the generated or adapted code is runnable, includes necessary imports, and potentially perform basic validation using `compile()` or linters.",
-      "related_files": ["app/agents/output_generator.py", "app/utils/code_validator.py", "app/services/code_agent.py"],
-      "status": "completed"
-    },
-    {
-      "id": "integration_3",
-      "task": "Attribution",
-      "description": "Clearly cite the sources of information or code examples used in the final output. Extract source URLs or metadata during the action phase and include them in the final response formatting.",
-      "related_files": ["app/agents/output_generator.py", "app/utils/result_processor.py"],
-      "status": "completed"
-    },
-    {
-      "id": "integration_4",
-      "task": "Confidence Scoring",
-      "description": "Indicate the confidence level of the provided answer, especially if it's based on conflicting or potentially outdated sources. This could involve asking the LLM to self-assess or using heuristics based on source reliability.",
-      "related_files": ["app/agents/output_generator.py"],
-      "status": "completed"
-    },
-    {
-      "id": "integration_5",
-      "task": "Structured and Context-Appropriate Output",
-      "description": "Present the output in a clear, structured format (using markdown, code blocks, bullet points) tailored to the query type (e.g., step-by-step instructions, comparative analysis, annotated code examples). Define different output templates.",
-      "related_files": ["app/agents/output_generator.py"],
-      "status": "completed"
-    }
-  ],
-  "Overall Architecture Enhancements": [
-    {
-      "id": "overall_1",
-      "task": "State Management",
-      "description": "Maintain a clear state throughout the workflow execution to ensure context is preserved across phases. This state object could track the original query, optimized query, current plan, intermediate results, retrieved documents, etc.",
-      "related_files": ["app/workflow_manager.py", "app/main.py"],
-      "status": "completed"
-    },
-    {
-      "id": "overall_2",
-      "task": "Meta-Reflection",
-      "description": "Add a final reflection step *after* output generation to analyze the entire process. Did the plan work? Were the retrieved documents useful? Was the output helpful? Use this meta-reflection (potentially an LLM call analyzing logs) to learn and improve the agent's strategies over time.",
-      "related_files": ["app/agents/meta_reflector.py", "app/workflow_manager.py", "app/utils/logger.py"],
-      "status": "completed"
-    },
-    {
-      "id": "overall_3",
-      "task": "Evaluation Metrics",
-      "description": "Define and log quantitative metrics to evaluate the performance of each phase and the overall workflow (e.g., query optimization effectiveness score, plan success rate, relevance score of retrieved documents, final output quality rating, execution time). Use these metrics to guide future improvements.",
-      "related_files": ["app/workflow_manager.py", "app/utils/logger.py"],
-      "status": "completed"
-    }
-  ]
-} 
+[
+  {
+    "id": "FEAT-001",
+    "title": "Multi-Language External Source Integration (Web/API)",
+    "description": "Enable the agent to connect and retrieve diverse information (versions, docs, code examples, vulnerabilities) from sources for Go, C#, Python, TS, JS. Each client implementation will be version controlled.",
+    "status": "todo",
+    "subtasks": [
+      {
+        "id": "TASK-001.1",
+        "title": "Define and Implement Generic API Client Interface",
+        "description": "Create and commit the abstract base class or interface (`interfaces/api_client.py`) defining common methods (e.g., `search_repositories`, `get_latest_version`, `fetch_file_content`, `fetch_documentation`, `find_code_examples`, `check_vulnerabilities`) for all external API clients. Include basic docstrings.",
+        "status": "todo",
+        "deliverable": "Committed `interfaces/api_client.py`"
+      },
+      {
+        "id": "TASK-001.2",
+        "title": "Implement and Test Core GitHub API Client",
+        "description": "Develop `clients/github_client.py` implementing the generic interface. Focus on repo search (code, issues, PRs), file content fetching, tag/commit checking, and potentially extracting code snippets from READMEs/Issues. Include comprehensive unit tests mocking API calls. Commit tested client.",
+        "status": "todo",
+        "deliverable": "Committed and tested `clients/github_client.py`"
+      },
+      {
+        "id": "TASK-001.3",
+        "title": "Implement and Test Package Manager Clients (PyPI, npm, Go, NuGet)",
+        "description": "Develop/Enhance clients (`clients/pypi_client.py`, `clients/npm_client.py`, `clients/go_proxy_client.py`, `clients/nuget_client.py`) implementing the generic interface to query for package versions, dependencies, vulnerability info (if available), and links to documentation/repositories for Python, JS/TS, Go, and C#. Include comprehensive unit tests mocking API calls. Commit tested clients.",
+        "status": "todo",
+        "deliverable": "Committed and tested PyPI, npm, Go, NuGet clients"
+      },
+      {
+        "id": "TASK-001.4",
+        "title": "Develop Documentation Scraper/Parser",
+        "description": "Implement a generic utility (`utils/doc_scraper.py`) capable of fetching and parsing content from common documentation site structures (e.g., ReadTheDocs, standard API reference formats) identified via package manager clients or GitHub repo links. Handle basic HTML cleaning. Commit tested scraper.",
+        "status": "todo",
+        "deliverable": "Committed and tested documentation scraper utility"
+      },
+      {
+        "id": "TASK-001.5",
+        "title": "Implement LLM-Powered Information Extraction Tool",
+        "description": "Create a new agent tool (`tools/llm_info_extractor.py`) that takes raw content (docs, code files) retrieved by API clients/scrapers and uses targeted LLM prompts (`models/prompts/extraction_prompts.yaml`) to extract specific information like usage patterns, function signatures, setup instructions, or concise code examples. Include unit tests for prompt invocation. Commit tool and prompts.",
+        "status": "todo",
+        "deliverable": "Committed LLM info extractor tool and prompts"
+      },
+      {
+        "id": "TASK-001.6",
+        "title": "Implement Rate Limiting and Robust Error Handling",
+        "description": "Enhance all implemented clients and scrapers with mechanisms to handle API rate limits gracefully (e.g., backoff strategies) and manage common HTTP/API/parsing errors. Update unit tests. Commit enhancements.",
+        "status": "todo",
+        "deliverable": "Committed clients/scrapers with rate limiting and error handling"
+      },
+      {
+        "id": "TASK-001.7",
+        "title": "Integrate Data Gathering Tools into Planner/Executor",
+        "description": "Define new agent 'tools' wrapping the clients, scraper, and LLM extractor. Modify Planner (`app/agents/planner.py`) and Executor (`app/services/plan_executor.py`) to utilize these tools effectively for the 'deep search' goal. Implement integration tests covering multi-step data gathering. Commit integration.",
+        "status": "todo",
+        "deliverable": "Committed tools and planner/executor integration with tests"
+      },
+      {
+        "id": "TASK-001.8",
+        "title": "Update Configuration and Documentation for API Keys & Scrapers",
+        "description": "Update `config.py` structure and `README.md` for API keys and any scraper-specific configurations (e.g., user-agent). Commit documentation and config changes.",
+        "status": "todo",
+        "deliverable": "Committed config structure and documentation updates"
+      }
+    ]
+  },
+  {
+    "id": "FEAT-002",
+    "title": "Multi-Language Version Control and Comparison Mechanisms",
+    "description": "Implement capabilities to identify local dependencies (Go, C#, Python, TS, JS), compare them with external sources, and analyze code differences semantically.",
+    "status": "todo",
+    "subtasks": [
+      {
+        "id": "TASK-002.1",
+        "title": "Implement and Test Multi-Language Dependency Parser",
+        "description": "Create/Enhance `utils/dependency_parser.py` to accurately parse `requirements.txt`, `package.json`, `go.mod`, and `.csproj` (or relevant NuGet manifest files) to extract dependency names and version specifiers. Include unit tests covering all supported languages. Commit tested parser.",
+        "status": "todo",
+        "deliverable": "Committed and tested multi-language dependency parser"
+      },
+      {
+        "id": "TASK-002.2",
+        "title": "Implement and Test Multi-Language Version Comparison Service",
+        "description": "Implement `services/version_comparer.py` using the multi-language parser (TASK-002.1) and relevant API clients (TASK-001.x) to compare local versions against latest external versions using semantic versioning. Include unit tests for all supported languages. Commit tested service.",
+        "status": "todo",
+        "deliverable": "Committed and tested version comparison service"
+      },
+      {
+        "id": "TASK-002.3",
+        "title": "Research and Select Advanced Code Diffing Technique",
+        "description": "Investigate options for semantic code diffing (AST diffing, control-flow graph analysis, LLM-based). Document the chosen approach with rationale, considering multi-language compatibility. Commit research findings/decision document.",
+        "status": "todo",
+        "deliverable": "Committed document outlining chosen diffing strategy"
+      },
+      {
+        "id": "TASK-002.4",
+        "title": "Implement and Test Selected Code Diffing Technique",
+        "description": "Implement the chosen code diffing technique in `services/code_differ.py`. Ensure it can handle syntax variations between supported languages where applicable. Include unit tests with examples from different languages. Commit tested differ.",
+        "status": "todo",
+        "deliverable": "Committed and tested multi-language code differ service"
+      },
+      {
+        "id": "TASK-002.5",
+        "title": "Implement and Test Git Context Integration",
+        "description": "Create `utils/git_utils.py` to interact with the local Git repository (using `gitpython` or subprocess) to determine current branch, check for uncommitted changes, and potentially read file history. Include unit tests mocking Git commands/responses. Commit tested utility.",
+        "status": "todo",
+        "deliverable": "Committed and tested Git utility module"
+      }
+    ]
+  },
+  {
+    "id": "FEAT-003",
+    "title": "Proactive Analysis and Planning with Deep Search Context",
+    "description": "Enable the agent to initiate analysis autonomously, leveraging the rich context gathered from external sources and LLM processing.",
+    "status": "todo",
+    "subtasks": [
+      {
+        "id": "TASK-003.1",
+        "title": "Implement and Test Proactive Trigger Service",
+        "description": "Design and implement `services/proactive_trigger.py` supporting scheduled intervals and file system change detection. Include unit tests for trigger logic. Commit tested service.",
+        "status": "todo",
+        "deliverable": "Committed and tested proactive trigger service"
+      },
+      {
+        "id": "TASK-003.2",
+        "title": "Develop and Test External Data Driven Analyzer",
+        "description": "Develop `analysis/proactive_analyzer.py` that uses version comparison (TASK-002.2), vulnerability data (TASK-001.3), and potentially LLM-extracted best practices (TASK-001.5) to identify issues (outdated deps, vulns, deprecated patterns, deviations from current best practices). Define comprehensive issue structure. Include unit tests. Commit tested analyzer.",
+        "status": "todo",
+        "deliverable": "Committed and tested proactive analyzer module"
+      },
+      {
+        "id": "TASK-003.3",
+        "title": "Enhance Planner/Reflection for Proactive Task Generation",
+        "description": "Adapt Planner (`app/agents/planner.py`) and Reflection Engine (`agent/reflection.py`) to evaluate issues from the analyzer (TASK-003.2), considering severity and project context, and generate sophisticated, multi-step plans (e.g., 'Update library X, find current usage examples via deep search, refactor local code based on examples, validate'). Implement integration tests. Commit enhancements.",
+        "status": "todo",
+        "deliverable": "Committed planner/reflection engine enhancements with tests"
+      },
+      {
+        "id": "TASK-003.4",
+        "title": "Develop and Test LLM Prompts for Proactive Solution Generation",
+        "description": "Craft and test specific LLM prompts via `models/llm.py` to generate potential code fixes or refactoring suggestions based on proactive findings and retrieved external context (code examples, docs). Commit tested prompt templates.",
+        "status": "todo",
+        "deliverable": "Committed and tested proactive LLM solution prompts"
+      }
+    ]
+  },
+  {
+    "id": "FEAT-004",
+    "title": "Risk Management, LLM Validation, and Mitigation Strategies",
+    "description": "Implement mechanisms to assess risks, use LLM for validation, handle incompatibilities, ensure safe application of changes, and allow for user control across supported languages.",
+    "status": "todo",
+    "subtasks": [
+      {
+        "id": "TASK-004.1",
+        "title": "Develop and Test Risk Assessment Module",
+        "description": "Create `analysis/risk_assessor.py` using LLM analysis (evaluating semantic diff TASK-002.4), dependency graph info, version jump size, and test results (TASK-004.4) to assign risk scores/levels to proposed changes across languages. Include unit tests. Commit tested module.",
+        "status": "todo",
+        "deliverable": "Committed and tested risk assessment module"
+      },
+      {
+        "id": "TASK-004.2",
+        "title": "Implement and Test Dependency Conflict Detection",
+        "description": "Enhance dependency analysis (TASK-002.1) to explicitly detect potential conflicts across the supported languages. Implement logic in `analysis/conflict_detector.py`. Include unit tests. Commit tested detector.",
+        "status": "todo",
+        "deliverable": "Committed and tested conflict detector"
+      },
+      {
+        "id": "TASK-004.3",
+        "title": "Develop Basic Interactive Conflict Resolver (CLI)",
+        "description": "Implement a basic CLI prompt mechanism (`ui/conflict_resolver.py`) presenting detected conflicts (TASK-004.2) to the user and suggesting potential resolutions. Commit resolver UI.",
+        "status": "todo",
+        "deliverable": "Committed CLI conflict resolver"
+      },
+      {
+        "id": "TASK-004.4",
+        "title": "Implement Enhanced Validation Service (Static Analysis, Tests)",
+        "description": "Create/Enhance `services/validation_service.py` to optionally run configured static analysis tools (linters, security scanners relevant to Go, C#, Py, JS/TS) and execute language-specific test suites (`go test`, `dotnet test`, `pytest`, `npm test`) against proposed changes. Include unit/integration tests. Commit enhanced service.",
+        "status": "todo",
+        "deliverable": "Committed enhanced validation service with tests"
+      },
+      {
+        "id": "TASK-004.5",
+        "title": "Implement LLM-Based Code Validation/Testing Tool",
+        "description": "Create a new agent tool (`tools/llm_code_tester.py`) that uses LLM prompts (`models/prompts/validation_prompts.yaml`) to evaluate generated/modified code snippets or external examples for correctness, adherence to best practices, or potential issues based on provided context (e.g., 'Does this Go code snippet correctly handle errors?', 'Is this C# implementation thread-safe?'). Commit tool and prompts.",
+        "status": "todo",
+        "deliverable": "Committed LLM code tester tool and prompts"
+      },
+      {
+        "id": "TASK-004.6",
+        "title": "Implement and Test Git-Based Rollback Mechanism",
+        "description": "Implement a strategy in the Plan Executor using `utils/git_utils.py` (TASK-002.5): Create a temporary branch, apply changes, run validation (TASK-004.4 and potentially TASK-004.5). If valid, merge; otherwise, reset/delete the branch. Ensure atomicity. Include integration tests. Commit tested mechanism.",
+        "status": "todo",
+        "deliverable": "Committed and tested Git-based rollback mechanism"
+      },
+      {
+        "id": "TASK-004.7",
+        "title": "Implement and Test Configurable User Confirmation",
+        "description": "Add settings to `config.py` for risk thresholds. Modify Plan Executor to check assessed risk (TASK-004.1) and trigger user confirmation (via UI module) if required before applying high-risk changes. Include unit tests. Commit tested feature.",
+        "status": "todo",
+        "deliverable": "Committed user confirmation feature with tests"
+      }
+    ]
+  }
+] 
