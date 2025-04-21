@@ -1,6 +1,6 @@
 from models.llm import call_llm
 from agent.logger import get_logger
-from config import PROMPT_SAFETY_DIRECTIVE
+from config import settings
 
 logger = get_logger(__name__)
 
@@ -12,7 +12,7 @@ class SubgoalManager:
 
     def analyze_and_create_subgoals(self, user_query: str):
         prompt = (
-            f"{PROMPT_SAFETY_DIRECTIVE}\n"
+            f"{settings.PROMPT_SAFETY_DIRECTIVE}\n"
             "Break down the user's query into logical subgoals. "
             "List each subgoal on a separate line.\n"
             f"User query:\n{user_query}"

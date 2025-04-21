@@ -1,36 +1,47 @@
-from qdrant_client import QdrantClient
-from models.embeddings import get_embedding
-from config import QDRANT_HOST, QDRANT_COLLECTION, EMBEDDING_DIMENSION
+from tools.vector_search import VectorSearchTool
 import logging
 
 logger = logging.getLogger(__name__)
 
 class RAGRetrievalTool:
     """
-    RAG (Retrieval-Augmented Generation) tool that uses Qdrant database 
-    to retrieve relevant context for queries.
+    RAG (Retrieval-Augmented Generation) tool that uses VectorSearchTool
+    to retrieve relevant context for queries from the Qdrant database.
     """
     def __init__(self):
         try:
-            self.client = QdrantClient(url=QDRANT_HOST)
-            # Check if collection exists, if not provide error message
-            self.client.get_collection(collection_name=QDRANT_COLLECTION)
+            # Initialize the VectorSearchTool (which handles Qdrant client setup/check)
+            self.vector_search = VectorSearchTool()
+            logger.info("RAGRetrievalTool initialized using VectorSearchTool.")
         except Exception as e:
-            logger.exception("RAGRetrieval: Failed to get Qdrant collection: %s", e)
-            self.client = None
+            # Log the error from VectorSearchTool initialization if it failed
+            logger.error("RAGRetrievalTool failed to initialize VectorSearchTool: %s", e)
+            self.vector_search = None # Ensure it's None if init fails
 
-    def retrieve(self, query: str) -> str:
-        if not self.client:
-            return "Error: Could not connect to Qdrant collection."
+    def retrieve(self, query: str, k: int = 3) -> str:
+        """
+        Retrieves relevant chunks from the vector store.
+
+        Args:
+            query: The query string.
+            k: The number of results to retrieve.
+
+        Returns:
+            A string containing the retrieved results or an error message.
+        """
+        if not self.vector_search:
+            return "Error: RAGRetrievalTool is not available (failed to initialize VectorSearchTool). Check logs."
+            
         try:
-            query_embedding = get_embedding(query).tolist()
-            search_result = self.client.search(
-                collection_name=QDRANT_COLLECTION,
-                query_vector=query_embedding,
-                limit=3
-            )
-            results = [hit.payload.get("chunk", "") for hit in search_result]
-            return f"RAG retrieval result: {'; '.join(results)}"
+            # Use the search method from VectorSearchTool
+            results = self.vector_search.search(query=query, k=k)
+            if not results:
+                return f"RAG retrieval for '{query}' returned no results."
+                
+            # Join results into a single string context
+            context = "\n---\n".join(results)
+            return f"Retrieved context:\n{context}"
+            
         except Exception as e:
-            logger.exception("Error in RAGRetrieval query: %s", e)
-            return f"Error: RAGRetrieval query error: {str(e)}" 
+            logger.exception("Error during RAG retrieval using VectorSearchTool: %s", e)
+            return f"Error: RAG retrieval failed: {str(e)}" 

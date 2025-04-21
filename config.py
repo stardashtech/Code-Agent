@@ -1,44 +1,80 @@
 import os
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
 
-# OpenAI API information
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("Please define the OPENAI_API_KEY environment variable.")
+class Settings(BaseSettings):
+    """Manages application configuration using Pydantic BaseSettings."""
+    
+    # Load .env file if it exists
+    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
-# LLM ChatCompletion Model
-LLM_MODEL = "gemma3:4b"  # Updated to use Gemma
-LLM_TEMPERATURE = 0.2
-LLM_MAX_TOKENS = 1024
-PROMPT_SAFETY_DIRECTIVE = (
-    "WARNING: Please do not generate any sensitive or dangerous content. "
-    "Complete the given prompt instructions in accordance with safety rules."
-)
+    # --- API Keys --- 
+    # Specific keys are optional; logic in modules might fallback or require them conditionally.
+    OPENAI_API_KEY: Optional[str] = None
+    GOOGLE_API_KEY: Optional[str] = None
+    GOOGLE_CSE_ID: Optional[str] = None 
+    MEILISEARCH_API_KEY: str = "masterKey" # Default key for local Meili
+    # EMBEDDING_API_KEY is intentionally omitted here, let modules use OPENAI_API_KEY if needed
+    # as embedding provider logic already handles this fallback.
 
-# Embedding Model
-EMBEDDING_MODEL = "nomic-embed-text"  # Updated to use nomic-embed-text
-EMBEDDING_DIMENSION = 1024  # Matches nomic-embed-text dimension
+    # --- LLM --- 
+    LLM_PROVIDER: str = "ollama" # Supported: "ollama", "openai"
+    LLM_MODEL: str = "gemma:latest"
+    LLM_BASE_URL: str = "http://localhost:11434"
+    LLM_TEMPERATURE: float = 0.2
+    LLM_MAX_TOKENS: int = 1024
+    PROMPT_SAFETY_DIRECTIVE: str = (
+        "WARNING: Please do not generate any sensitive or dangerous content. "
+        "Complete the given prompt instructions in accordance with safety rules."
+    )
 
-# Code execution settings
-CODE_EXECUTION_TIMEOUT = 5  # seconds
-DOCKER_IMAGE = "python:3.9-slim"  # Docker image to use
+    # --- Embeddings --- 
+    EMBEDDING_PROVIDER: str = "ollama" # Supported: "ollama", "openai"
+    EMBEDDING_MODEL: str = "nomic-embed-text"
+    # EMBEDDING_BASE_URL defaults to LLM_BASE_URL if not explicitly set
+    EMBEDDING_BASE_URL: Optional[str] = None 
+    EMBEDDING_DIMENSION: int = 768 # Default, adjust if using different models
+    
+    # --- Vector Store (Qdrant) --- 
+    QDRANT_HOST: str = "http://localhost:6333"
+    QDRANT_COLLECTION: str = "agent_docs"
 
-# Qdrant Settings
-QDRANT_HOST = os.getenv("QDRANT_HOST", "http://localhost:6333")
-QDRANT_COLLECTION = "agent_docs"
+    # --- Knowledge Graph (Neo4j) ---
+    NEO4J_URI: str = "bolt://localhost:7687"
+    NEO4J_USER: str = "neo4j"
+    NEO4J_PASSWORD: str = "password"
 
-# MeiliSearch Settings (for logging)
-MEILISEARCH_HOST = os.getenv("MEILISEARCH_HOST", "http://localhost:7700")
-MEILISEARCH_API_KEY = os.getenv("MEILISEARCH_API_KEY", "masterKey")
-MEILISEARCH_INDEX = "agent_logs"
+    # --- Logging Store (MeiliSearch) --- 
+    MEILISEARCH_HOST: str = "http://localhost:7700"
+    MEILISEARCH_INDEX: str = "agent_logs"
 
-# Chunking settings
-CHUNK_SIZE = 500  # Character limit per chunk
+    # --- Redis Cache --- 
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_CACHE_TTL: int = 86400 # 24 hours
 
-# Redis Settings
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-REDIS_DB = int(os.getenv("REDIS_DB", "0"))
-REDIS_CACHE_TTL = int(os.getenv("REDIS_CACHE_TTL", "86400"))  # 24 hours in seconds
+    # --- Code Execution --- 
+    CODE_EXECUTION_TIMEOUT: int = 5 # seconds
+    DOCKER_IMAGE: str = "python:3.9-slim"
+    # DOCKER_HOST is read directly via os.getenv in CodeExecutor as needed
 
-# Chain-of-thought logging (hidden reflection)
-ENABLE_CHAIN_OF_THOUGHT_LOGGING = True 
+    # --- Processing --- 
+    CHUNK_SIZE: int = 500
+
+    # --- Agent Behavior --- 
+    ENABLE_CHAIN_OF_THOUGHT_LOGGING: bool = True
+
+    # --- Helper method to get embedding base url --- 
+    @property
+    def effective_embedding_base_url(self) -> str:
+        return self.EMBEDDING_BASE_URL or self.LLM_BASE_URL
+
+# Create a single instance of the settings to be imported by other modules
+try:
+    settings = Settings()
+except Exception as e:
+    # Handle potential validation errors during settings loading
+    print(f"FATAL ERROR: Failed to load configuration settings: {e}")
+    # Depending on the application context, you might exit or raise further
+    raise SystemExit(f"Configuration error: {e}") from e 

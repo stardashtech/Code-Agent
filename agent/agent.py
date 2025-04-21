@@ -39,6 +39,10 @@ class CodeAgent:
 
         # 3. Process each subgoal and record hidden chain-of-thought
         execution_trace = []
+        final_answer = None
+        needs_clarification = False
+        clarification_message = ""
+
         for idx, sg in enumerate(subgoals):
             logger.info("Running subgoal %d: %s", idx + 1, sg)
             step_result = self.orchestrator.execute_subgoal(sg)
@@ -52,23 +56,43 @@ class CodeAgent:
                 short_term_mem=self.short_term_memory
             )
             logger.info("Reflection result: %s", reflection_output)
+
             if reflection_output.get("need_replanning"):
-                revised_plan = self.planner.replan_with_context(
-                    user_query,
-                    reflection_output.get("reflection_text", "")
-                )
-                logger.info("Revised plan after reflection: %s", revised_plan)
+                logger.warning("Reflection indicated replanning/clarification needed. Stopping execution.")
+                # Store the reason/suggestion from reflection
+                clarification_message = reflection_output.get("reflection_text", "Replanning or clarification required, but no specific text provided.")
+                needs_clarification = True
+                # Optional: Log the revised plan if needed for debugging, but don't execute it.
+                # revised_plan = self.planner.replan_with_context(
+                #     user_query,
+                #     clarification_message,
+                #     subgoals # Pass original subgoals here
+                # )
+                # logger.info("Suggested revised plan (not executed): %s", revised_plan)
+                break # Stop processing further subgoals
 
-        # 4. Generate final answer (all traces collected and final LLM call made)
-        final_answer = self.orchestrator.generate_final_answer(user_query, execution_trace)
-        self.long_term_memory.add("last_query", user_query)
-        self.long_term_memory.add("last_answer", final_answer)
-
-        result = {
-            "plan": initial_plan,
-            "subgoals": subgoals,
-            "execution_trace": execution_trace,
-            "final_answer": final_answer,
-            "chain_of_thought": self.short_term_memory.get("chain_of_thought")
-        }
+        # 4. Generate final answer ONLY if execution completed without needing clarification
+        if not needs_clarification:
+            final_answer = self.orchestrator.generate_final_answer(user_query, execution_trace)
+            self.long_term_memory.add("last_query", user_query)
+            self.long_term_memory.add("last_answer", final_answer)
+            result = {
+                "status": "completed",
+                "plan": initial_plan,
+                "subgoals": subgoals,
+                "execution_trace": execution_trace,
+                "final_answer": final_answer,
+                # Optionally include chain_of_thought if needed for completed runs
+                # "chain_of_thought": self.short_term_memory.get("chain_of_thought") 
+            }
+        else:
+            # Return a different structure indicating clarification is needed
+            result = {
+                "status": "clarification_needed",
+                "message": clarification_message,
+                "plan": initial_plan, # Include context
+                "subgoals": subgoals,
+                "execution_trace": execution_trace # Include context up to the point of stopping
+            }
+            
         return result 
