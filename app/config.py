@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     """Application settings"""
     
     # LLM Provider Configuration
-    llm_provider: str = "openrouter"  # openai, openrouter, ollama, or vllm
+    llm_provider: str = "openai"  # openai, openrouter, ollama, or vllm
     
     # Embedding Configuration
     embedding_dimension: int = 1536  # Default dimension for text-embedding-3-small

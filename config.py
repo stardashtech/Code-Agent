@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     # --- LLM --- 
     LLM_PROVIDER: str = "ollama" # Supported: "ollama", "openai"
-    LLM_MODEL: str = "gemma:latest"
+    LLM_MODEL: str = "gemma3:4b" # Using codellama model which is available in the system
     LLM_BASE_URL: str = "http://localhost:11434"
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: int = 1024
@@ -64,6 +64,7 @@ class Settings(BaseSettings):
 
     # --- Agent Behavior --- 
     ENABLE_CHAIN_OF_THOUGHT_LOGGING: bool = True
+    RISK_CONFIRMATION_THRESHOLD: str = 'MEDIUM' # Risk level (e.g., LOW, MEDIUM, HIGH) at which user confirmation is required before applying changes.
 
     # --- Helper method to get embedding base url --- 
     @property

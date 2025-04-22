@@ -1,0 +1,6 @@
+summarize: 'Summarize the following content concisely:\n\n{content}'
+find_usage: 'Find code examples showing how to use the function mentioned in the context ({function_name}) based on this documentation:\n\n{content}'
+extract_code: 'Extract all code blocks from the following content and format them as a valid JSON array where each element has "language" and "code" properties:\n\n{content}'
+find_api_endpoints: 'Extract all API endpoints mentioned in the following documentation. Return them as a valid JSON array with each object containing "method", "path", and "description" properties:\n\n{content}'
+identify_concepts: 'Identify the main technical concepts discussed in the following content. Return them as a valid JSON array with each object containing "concept" and "description" properties:\n\n{content}'
+extract_parameters: 'Extract all parameters for the function or method named "{function_name}" from the following documentation. Return them as a valid JSON array with each object containing "name", "type", "required" (boolean), and "description" properties:\n\n{content}'

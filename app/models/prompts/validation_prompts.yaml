@@ -1,0 +1,49 @@
+# Prompts for LLM-based Code Validation and Testing
+
+check_error_handling_python:
+  # Input: {language}, {expected_behavior}, {code_snippet}
+  # Output: JSON with keys "passed", "feedback", "confidence"
+  |-
+    Analyze the following Python code snippet for proper error handling. 
+    Specifically check for:
+    - Use of bare `except:` clauses (prefer specific exceptions).
+    - Ignoring caught exceptions (e.g., `except Exception: pass`).
+    - Potential resource leaks in error paths (e.g., files not closed).
+    - Swallowing important error information.
+    
+    Context provided:
+    Expected Behavior: {expected_behavior}
+    
+    Code Snippet:
+    ```python
+    {code_snippet}
+    ```
+    
+    Respond with ONLY a JSON object with keys "passed" (boolean: true if error handling seems robust based on context, false otherwise), "feedback" (string: concise explanation of findings, highlighting specific issues if `passed` is false), and "confidence" (float 0-1: your confidence in the assessment).
+    Example good response: {{"passed": true, "feedback": "Error handling appears appropriate, catching specific expected exceptions.", "confidence": 0.9}}
+    Example bad response: {{"passed": false, "feedback": "Uses bare except clause on line 3, potentially hiding errors. Consider catching specific exceptions.", "confidence": 0.95}}
+
+check_thread_safety_python:
+  # Input: {language}, {code_snippet}
+  # Output: JSON with keys "passed", "feedback", "confidence"
+  |-
+    Assess the thread safety of the following Python code snippet, particularly regarding:
+    - Access to shared mutable state without proper locking (e.g., using `threading.Lock`).
+    - Potential race conditions.
+    - Use of non-thread-safe libraries or operations in concurrent contexts.
+    
+    Code Snippet:
+    ```python
+    {code_snippet}
+    ```
+    
+    Respond with ONLY a JSON object with keys "passed" (boolean: true if no obvious thread safety issues are found, false otherwise), "feedback" (string: explanation of potential issues or confirmation of apparent safety), and "confidence" (float 0-1).
+    Example response: {{"passed": false, "feedback": "Global variable 'counter' is accessed without a lock in function 'increment', leading to a potential race condition.", "confidence": 0.9}}
+
+# Add more validation prompts here for:
+# - Go error handling (check err != nil)
+# - C# resource disposal (using statements)
+# - JavaScript promise rejection handling
+# - Security checks (e.g., SQL injection hints, insecure deserialization)
+# - Checking for common anti-patterns
+# - Evaluating code against specific documentation guidelines 

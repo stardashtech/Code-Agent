@@ -22,10 +22,13 @@ class VectorStoreManager:
         """Initialize the VectorStoreManager.
 
         Args:
-            qdrant_host: The URL for the Qdrant instance.
+            qdrant_host: The complete URL for the Qdrant instance (including protocol, host and port).
+                         Example: 'http://localhost:6333'
             embedding_dimension: The dimension size of the embeddings.
             embedding_func: An async function that takes text and returns embeddings.
         """
+        # The qdrant_host parameter should already include the complete URL with protocol, host and port
+        # Example: 'http://localhost:6333'
         self.qdrant_client = QdrantClient(url=qdrant_host)
         self.embedding_dimension = embedding_dimension
         self.embedding_func = embedding_func  # Store the provided embedding function

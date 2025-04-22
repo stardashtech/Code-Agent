@@ -35,4 +35,19 @@ numpy>=1.24.0
 # Dev tools
 black>=23.7.0
 isort>=5.12.0
-mypy>=1.5.0 
+mypy>=1.5.0
+
+# Code analysis and AST diffing
+tree-sitter>=0.21.0
+tree-sitter-languages>=1.8.0 # Provides pre-built grammars for many languages
+packaging>=23.0 # Already used in version_comparer, ensure it's here
+
+# GitPython for TASK-002.5
+gitpython>=3.1.30
+
+# Proactive Trigger dependencies
+schedule>=1.2.0
+
+# Web Scraping
+beautifulsoup4>=4.11.0
+lxml>=4.9.0 

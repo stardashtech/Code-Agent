@@ -26,8 +26,19 @@ from app.services.plan_executor import PlanExecutor
 from app.tools.web_search import TavilySearchProvider # <-- Added import
 
 # Import providers from their new locations
-from app.tools.github_search import GitHubSearchProvider 
+from app.tools.github_search import GitHubSearchProvider # <-- Removed GitHubApiClient import
 from app.tools.stackoverflow_search import StackOverflowSearchProvider
+# Import other potential clients (even if not fully implemented yet)
+from app.tools.pypi_client import PyPiClient
+# Import placeholder or future clients (adjust paths if needed)
+from app.tools.npm_client import NpmClient
+from app.tools.go_proxy_client import GoProxyClient
+from app.tools.nuget_client import NuGetClient
+from app.services.doc_scraper import DocumentationScraper
+from app.services.llm_info_extractor import LlmInfoExtractor
+
+# ---> ADD IMPORT FOR ValidationService <--- 
+from app.services.validation_service import ValidationService
 
 logger = logging.getLogger(__name__)
 
@@ -377,74 +388,175 @@ class CodeAgent:
     def __init__(self, config: Config):
         """Initialize the code agent with providers and managers."""
         self.config = config
-        self.provider: Optional[LLMProvider] = None
+        # Separate providers for completion and embedding
+        self.completion_provider: Optional[LLMProvider] = None
+        self.embedding_provider: Optional[LLMProvider] = None
+        # self.provider is now an alias for completion_provider for backward compatibility
+        # with components like Reflector and Planner that expect a single provider.
+        self.provider: Optional[LLMProvider] = None 
         self.executor = ThreadPoolExecutor()
         self.sandbox_runner: Optional[SandboxRunner] = None
         self.plan_executor: Optional[PlanExecutor] = None
-        self.web_search_provider: Optional[TavilySearchProvider] = None # <-- Added attribute
+        self.web_search_provider: Optional[TavilySearchProvider] = None
         self.github_search_provider: Optional[GitHubSearchProvider] = None
         self.stackoverflow_search_provider: Optional[StackOverflowSearchProvider] = None
+        # Explicitly define client attributes expected by PlanExecutor (mostly as placeholders)
+        # self.github_client: Optional[GitHubApiClient] = None <-- Removed
+        self.pypi_client: Optional[PyPiClient] = None
+        # ---> Initialize NpmClient attribute <--- 
+        self.npm_client: Optional[NpmClient] = None
+        self.go_proxy_client: Optional[GoProxyClient] = None
+        self.nuget_client: Optional[NuGetClient] = None
+        self.doc_scraper: Optional[DocumentationScraper] = None
+        self.llm_info_extractor: Optional[LlmInfoExtractor] = None
+        self.validation_service: Optional[ValidationService] = None
+        self.workspace_root = os.getcwd() # Define workspace root
 
-        # Initialize LLM Provider
-        # Temporarily force OpenAI for testing
-        # if settings.llm_provider == "openai" and settings.openai_api_key:
-        if settings.openai_api_key: # Force check for OpenAI key
-            logger.info("Initializing OpenAI provider (Forced for testing)")
-            self.provider = OpenAIProvider(settings.openai_api_key, settings.openai_model)
-        # elif settings.llm_provider == "openrouter" and settings.openrouter_api_key:
-        #     logger.info("Initializing OpenRouter provider")
-        #     self.provider = OpenRouterProvider(settings.openrouter_api_key, settings.openrouter_model)
-        # elif settings.llm_provider == "ollama":
-        #     logger.info("Initializing Ollama provider")
-        #     self.provider = OllamaProvider(model=settings.ollama_model)
-        # elif settings.llm_provider == "vllm":
-        #     logger.info("Initializing vLLM provider")
-        #     self.provider = VLLMProvider()
-        else:
-            logger.warning(f"OpenAI API key not found, or other providers not configured. Falling back...")
-            # Attempt other providers if OpenAI key is missing
-            if settings.llm_provider == "openrouter" and settings.openrouter_api_key:
-                logger.info("Initializing OpenRouter provider (Fallback)")
-                self.provider = OpenRouterProvider(settings.openrouter_api_key, settings.openrouter_model)
-            elif settings.llm_provider == "ollama":
-                logger.info("Initializing Ollama provider (Fallback)")
-                self.provider = OllamaProvider(model=settings.ollama_model)
-            elif settings.llm_provider == "vllm":
-                logger.info("Initializing vLLM provider (Fallback)")
-                self.provider = VLLMProvider()
-            else:
-                logger.warning(f"LLM Provider '{settings.llm_provider}' not configured or API key missing.")
-                pass # Keep self.provider as None
+        # --- Initialize LLM Providers ---
         
-        if not self.provider:
-            raise ValueError("No valid LLM provider could be initialized based on configuration.")
-            
-        # Initialize Agents
-        self.reflector = Reflector(self.provider)
-        self.planner = Planner(self.provider)
+        # 1. Initialize Completion Provider
+        completion_provider_initialized = False
+        if settings.llm_provider == "openai" and settings.openai_api_key:
+            logger.info(f"Initializing OpenAI as completion provider (Model: {settings.openai_model})")
+            try:
+                self.completion_provider = OpenAIProvider(settings.openai_api_key, settings.openai_model)
+                completion_provider_initialized = True
+            except Exception as e:
+                logger.warning(f"Failed to initialize OpenAI completion provider: {e}")
+        elif settings.llm_provider == "openrouter" and settings.openrouter_api_key:
+            logger.info(f"Initializing OpenRouter as completion provider (Model: {settings.openrouter_model})")
+            try:
+                self.completion_provider = OpenRouterProvider(settings.openrouter_api_key, settings.openrouter_model)
+                completion_provider_initialized = True
+            except Exception as e:
+                 logger.warning(f"Failed to initialize OpenRouter completion provider: {e}")
+        elif settings.llm_provider == "ollama":
+            logger.info(f"Initializing Ollama as completion provider (Model: {settings.ollama_model})")
+            try:
+                 self.completion_provider = OllamaProvider(model=settings.ollama_model)
+                 completion_provider_initialized = True
+            except Exception as e:
+                 logger.warning(f"Failed to initialize Ollama completion provider: {e}")
+        elif settings.llm_provider == "vllm":
+            logger.info("Initializing vLLM as completion provider")
+            try:
+                self.completion_provider = VLLMProvider()
+                completion_provider_initialized = True
+            except Exception as e:
+                 logger.warning(f"Could not initialize vLLM completion provider: {e}. Check configuration.")
+        else:
+            logger.warning(f"Completion LLM Provider '{settings.llm_provider}' not recognized or required API key missing.")
 
-        # Initialize Search Providers (using imported classes)
+        # Fallback for Completion Provider (try Ollama if primary failed and wasn't Ollama)
+        if not completion_provider_initialized and settings.llm_provider != "ollama" and settings.ollama_base_url:
+             logger.info("Attempting Fallback: Initializing Ollama as completion provider")
+             try:
+                 self.completion_provider = OllamaProvider(model=settings.ollama_model)
+                 completion_provider_initialized = True
+             except Exception as e:
+                 logger.warning(f"Failed to initialize Ollama fallback completion provider: {e}")
+
+        if not self.completion_provider:
+            # If still no completion provider, this is a critical failure
+            raise ValueError("FATAL: No valid LLM provider could be initialized for completions.")
+            
+        # Alias self.provider to self.completion_provider for compatibility
+        self.provider = self.completion_provider
+        logger.info(f"Completion provider set to: {self.completion_provider.__class__.__name__}")
+
+        # 2. Initialize Embedding Provider (Prioritize Ollama, fallback to OpenAI)
+        embedding_provider_initialized = False
+        # Try Ollama first for embeddings if configured
+        if settings.ollama_base_url:
+            logger.info(f"Attempting to initialize Ollama as embedding provider (Model: {OllamaProvider().embedding_model})")
+            try:
+                self.embedding_provider = OllamaProvider() # Uses default embedding model internally
+                # Test connection immediately
+                # await self.embedding_provider.generate_embedding("test") # Cannot await in __init__
+                logger.info(f"Successfully initialized Ollama as embedding provider.")
+                embedding_provider_initialized = True
+            except Exception as e:
+                 logger.warning(f"Could not initialize Ollama as embedding provider: {e}. Will try fallback.")
+                 
+        # Fallback to OpenAI if Ollama failed or wasn't configured, and OpenAI is configured
+        if not embedding_provider_initialized and settings.openai_api_key:
+            logger.info("Attempting Fallback: Initializing OpenAI as embedding provider")
+            try:
+                 # Use the same OpenAI client instance if completion provider is also OpenAI
+                 if isinstance(self.completion_provider, OpenAIProvider):
+                     self.embedding_provider = self.completion_provider
+                     logger.info("Reusing OpenAI completion provider instance for embeddings.")
+                 else:
+                     self.embedding_provider = OpenAIProvider(settings.openai_api_key, settings.openai_model) # Model choice might not matter much here
+                     logger.info("Initialized separate OpenAI provider instance for embeddings.")
+                 embedding_provider_initialized = True
+            except Exception as e:
+                 logger.warning(f"Could not initialize OpenAI as embedding provider: {e}")
+
+        # Fallback to vLLM if others failed and vLLM is configured
+        if not embedding_provider_initialized and settings.vllm_url and settings.vllm_embedding_model:
+             logger.info("Attempting Fallback: Initializing vLLM as embedding provider")
+             try:
+                  if isinstance(self.completion_provider, VLLMProvider):
+                       self.embedding_provider = self.completion_provider # Reuse if possible
+                       logger.info("Reusing vLLM completion provider instance for embeddings.")
+                  else:
+                       self.embedding_provider = VLLMProvider() # Creates new instance
+                       logger.info("Initialized separate vLLM provider instance for embeddings.")
+                  embedding_provider_initialized = True
+             except Exception as e:
+                  logger.warning(f"Could not initialize vLLM as embedding provider: {e}")
+
+        if not self.embedding_provider:
+             # This is serious, as vector store relies on it. Log critical error.
+             logger.critical("FATAL: No embedding provider (Ollama, OpenAI, or vLLM) could be initialized. Vector search will fail.")
+             # We might allow the agent to continue without embeddings, but log appropriately.
+             # For now, let initialization continue but VectorStoreManager might fail later.
+        else:
+             logger.info(f"Embedding provider set to: {self.embedding_provider.__class__.__name__}")
+
+        # --- Initialize Agents (Pass the *completion* provider) ---
+        if not self.completion_provider: # Redundant check, but safe
+             raise ValueError("FATAL: Completion provider not set before initializing dependent agents.")
+        self.reflector = Reflector(self.completion_provider)
+        self.planner = Planner(self.completion_provider)
+
+        # Initialize Search Providers and Clients
         try:
-            # Use imported GitHubSearchProvider
             self.github_search_provider = GitHubSearchProvider(access_token=settings.github_token)
-            logger.info("Initialized GitHubSearchProvider from app.tools.github_search.")
+            logger.info(f"Initialized GitHubSearchProvider (Token Present: {bool(settings.github_token)}).")
         except Exception as e:
-            logger.warning(f"Could not initialize GitHubSearchProvider: {e}.")
+            logger.warning(f"Could not initialize GitHubSearchProvider: {e}. GitHub search disabled.")
             self.github_search_provider = None
+
         try:
-             # Use imported StackOverflowSearchProvider
              self.stackoverflow_search_provider = StackOverflowSearchProvider(api_key=settings.stackoverflow_key)
-             logger.info("Initialized StackOverflowSearchProvider from app.tools.stackoverflow_search.")
+             logger.info(f"Initialized StackOverflowSearchProvider (Key Present: {bool(settings.stackoverflow_key)}).")
         except Exception as e:
-             logger.warning(f"Could not initialize StackOverflowSearchProvider: {e}.")
+             logger.warning(f"Could not initialize StackOverflowSearchProvider: {e}. StackOverflow search disabled.")
              self.stackoverflow_search_provider = None
-        # <-- Initialize Tavily Search Provider -->
+
         try:
             self.web_search_provider = TavilySearchProvider()
+            logger.info("Initialized TavilySearchProvider.")
         except Exception as e:
-            logger.error(f"Failed to initialize TavilySearchProvider: {e}.", exc_info=True)
+            logger.error(f"Failed to initialize TavilySearchProvider: {e}. Web search disabled.", exc_info=True)
             self.web_search_provider = None
-        # <-- End Initialize Tavily -->
+
+        # Initialize other clients (as None for now, implement later if needed)
+        # Example for PyPi:
+        # try:
+        #     self.pypi_client = PyPiClient()
+        #     logger.info("Initialized PyPiClient.")
+        # except Exception as e:
+        #     logger.warning(f"Could not initialize PyPiClient: {e}")
+        #     self.pypi_client = None
+        self.pypi_client = None # Placeholder
+        self.go_proxy_client = None # Placeholder
+        self.nuget_client = None # Placeholder
+        self.doc_scraper = None # Placeholder - Needs implementation
+        self.llm_info_extractor = None # Placeholder - Needs implementation
+
 
         # Initialize Redis Client (for embedding cache)
         try:
@@ -459,67 +571,141 @@ class CodeAgent:
         except redis.exceptions.ConnectionError as e:
              logger.warning(f"Could not connect to Redis: {e}. Caching disabled.")
              self.redis_client = None
-        
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during Redis initialization: {e}", exc_info=True)
+            self.redis_client = None
+
         # Initialize Vector Store Manager
         try:
+            # Check if embedding provider is available before initializing VectorStoreManager
+            if not self.embedding_provider:
+                 raise ValueError("Embedding provider is not available, cannot initialize VectorStoreManager.")
+                 
             self.vector_store_manager = VectorStoreManager(
-                qdrant_host=config.qdrant_host, 
+                qdrant_host=f"http://{config.qdrant_host}:{config.qdrant_port}",
                 embedding_dimension=config.embedding_dimension,
-                embedding_func=self.generate_embedding 
+                embedding_func=self.generate_embedding # This method now uses self.embedding_provider
             )
+            logger.info("VectorStoreManager initialized successfully.")
         except Exception as e:
-             logger.critical(f"Failed to initialize VectorStoreManager: {e}", exc_info=True)
-             raise 
+             logger.critical(f"FATAL: Failed to initialize VectorStoreManager: {e}", exc_info=True)
+             # Decide if agent should raise or continue with degraded functionality
+             # raise # Vector store might be critical
+             self.vector_store_manager = None # Allow continuation but log critical failure
+             logger.critical("Continuing without VectorStoreManager functionality.")
+
 
         # Initialize Sandbox Runner
         try:
             self.sandbox_runner = DockerSandboxRunner()
             logger.info("DockerSandboxRunner initialized successfully.")
         except RuntimeError as e:
-             logger.error(f"Failed to initialize DockerSandboxRunner: {e}. Code validation will be skipped.", exc_info=True)
-             self.sandbox_runner = None 
+             # This specifically catches the Docker client init failure
+             logger.error(f"Failed to initialize DockerSandboxRunner: {e}. Code execution/validation disabled.", exc_info=False) # Don't need full TB for this
+             self.sandbox_runner = None
         except Exception as e:
-             logger.error(f"An unexpected error occurred during DockerSandboxRunner initialization: {e}", exc_info=True)
+             logger.error(f"An unexpected error occurred during DockerSandboxRunner initialization: {e}. Code execution disabled.", exc_info=True)
              self.sandbox_runner = None
 
-        # Initialize Plan Executor
-        self.plan_executor = PlanExecutor(self)
-        logger.info("PlanExecutor initialized successfully.")
+        # ---> MODIFIED Validation Service Initialization <--- 
+        try:
+            # Initialize ValidationService using the created class
+            if self.sandbox_runner: # Only initialize if runner exists
+                self.validation_service = ValidationService(self.sandbox_runner)
+                logger.info("ValidationService initialized.")
+            else:
+                 logger.warning("Sandbox runner not available, skipping ValidationService initialization.")
+                 self.validation_service = None
+        # Keep existing NameError catch just in case import fails
+        except NameError:
+             logger.error("'ValidationService' class not found. Ensure app/services/validation_service.py exists and is importable. Validation disabled.")
+             self.validation_service = None
+        except Exception as e:
+             # Log specific error during ValidationService init
+             logger.error(f"Failed to initialize ValidationService: {e}", exc_info=True)
+             self.validation_service = None
+        # ---> END MODIFIED Block <--- 
 
-        logger.info("CodeAgent initialized successfully")
+        # Initialize Plan Executor - MUST be last as it depends on agent attributes
+        try:
+            self.plan_executor = PlanExecutor(self)
+            logger.info("PlanExecutor initialized successfully.")
+        except Exception as e:
+            logger.critical(f"FATAL: Failed to initialize PlanExecutor: {e}", exc_info=True)
+            raise # Plan executor is critical
+
+        # ---> Initialize NpmClient <--- 
+        try:
+            # Initialize NpmClient (consider session management)
+            self.npm_client = NpmClient()
+            logger.info("Initialized NpmClient.")
+        except Exception as e:
+             logger.warning(f"Could not initialize NpmClient: {e}", exc_info=True)
+             self.npm_client = None
+        # ---> END NpmClient Initialization <--- 
+
+        logger.info("CodeAgent initialized successfully (Potential warnings above for optional components).")
         
     async def generate_completion(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
-        if not self.provider:
-            raise RuntimeError("LLM Provider not initialized.")
+        # Use the dedicated completion provider
+        if not self.completion_provider:
+            raise RuntimeError("Completion LLM Provider not initialized.")
+        logger.debug(f"Using completion provider: {self.completion_provider.__class__.__name__}")
         try:
-            return await self.provider.generate_completion(messages, temperature)
+            return await self.completion_provider.generate_completion(messages, temperature)
         except Exception as e:
             logger.error(f"Error generating completion: {str(e)}")
             raise
             
     async def generate_embedding(self, text: str) -> List[float]:
+        # Use the dedicated embedding provider
+        if not self.embedding_provider:
+             logger.error("Embedding provider not initialized. Cannot generate embedding.")
+             # Return a zero vector or raise error? Raising seems safer.
+             raise RuntimeError("Embedding LLM Provider not initialized.")
+             
+        logger.debug(f"Using embedding provider: {self.embedding_provider.__class__.__name__}")
+             
         cache_key = f"embedding:{hashlib.sha256(text.encode()).hexdigest()}"
+        
+        # --- Cache Check ---
         if self.redis_client:
             try:
                 cached_embedding_json = self.redis_client.get(cache_key)
                 if cached_embedding_json:
                     cached_embedding = json.loads(cached_embedding_json)
+                    # Validate cache entry before returning
                     if isinstance(cached_embedding, list) and len(cached_embedding) == self.config.embedding_dimension:
                         logger.debug(f"Cache hit for embedding: {cache_key[:15]}...")
                         return cached_embedding
                     else:
-                        logger.warning(f"Invalid cache format for {cache_key}. Fetching fresh.")
+                        logger.warning(f"Invalid cache format for {cache_key} (dim: {len(cached_embedding)} vs {self.config.embedding_dimension}). Fetching fresh.")
                 else:
                      logger.debug(f"Cache miss for embedding: {cache_key[:15]}...")
             except redis.exceptions.RedisError as e:
                 logger.warning(f"Redis GET error for {cache_key}: {e}. Fetching fresh.")
             except json.JSONDecodeError as e:
                  logger.warning(f"Cache JSON decode error for {cache_key}: {e}. Fetching fresh.")
+            except Exception as e: # Catch unexpected errors during cache check
+                 logger.warning(f"Unexpected error during cache check for {cache_key}: {e}. Fetching fresh.")
 
-        if not self.provider:
-             raise RuntimeError("LLM Provider not initialized for embedding generation.")
+        # --- Generate Embedding using dedicated provider ---
         try:
-            embedding = await self.provider.generate_embedding(text)
+            start_time = time.time()
+            embedding = await self.embedding_provider.generate_embedding(text)
+            duration = time.time() - start_time
+            logger.debug(f"Generated embedding via {self.embedding_provider.__class__.__name__} in {duration:.2f}s")
+
+            # --- Dimension Validation (already done in providers, but double-check maybe?) ---
+            if len(embedding) != self.config.embedding_dimension:
+                logger.error(f"{self.embedding_provider.__class__.__name__} returned wrong dimension: {len(embedding)} != {self.config.embedding_dimension}. Attempting fix.")
+                # Apply padding/truncation (redundant if providers do it, but safe)
+                if len(embedding) > self.config.embedding_dimension:
+                    embedding = embedding[:self.config.embedding_dimension]
+                else:
+                    embedding.extend([0.0] * (self.config.embedding_dimension - len(embedding)))
+
+            # --- Store in Cache ---
             if self.redis_client:
                 try:
                     embedding_json = json.dumps(embedding)
@@ -527,16 +713,23 @@ class CodeAgent:
                     logger.debug(f"Stored embedding in cache: {cache_key[:15]}...")
                 except redis.exceptions.RedisError as e:
                     logger.warning(f"Redis SETEX error for {cache_key}: {e}")
+                except Exception as e: # Catch unexpected errors during cache storage
+                     logger.warning(f"Unexpected error storing embedding in cache for {cache_key}: {e}")
+
             return embedding
+        except NotImplementedError:
+             logger.critical(f"FATAL: Configured embedding provider {self.embedding_provider.__class__.__name__} does not support embeddings!")
+             raise RuntimeError(f"Embedding provider {self.embedding_provider.__class__.__name__} does not support embeddings.")
         except Exception as e:
-            logger.error(f"Error generating embedding via provider: {str(e)}", exc_info=True)
-            raise
+            logger.error(f"Error generating embedding via provider {self.embedding_provider.__class__.__name__}: {str(e)}", exc_info=True)
+            raise # Re-raise the original error
 
     async def _generate_code_fix(self, query: str, code_snippets: List[Dict[str, Any]], 
                           analysis: str) -> Dict[str, Any]:
-        if not self.provider:
-             logger.error("LLM Provider not available for code fix generation.")
-             return self._generate_error_response("LLM Provider not configured.")
+        # Use self.generate_completion which now points to the correct provider
+        if not self.completion_provider: # Check completion provider specifically
+             logger.error("Completion LLM Provider not available for code fix generation.")
+             return self._generate_error_response("Completion LLM Provider not configured.")
 
         if not code_snippets:
             logger.warning("No code snippets provided for fix generation")
@@ -764,9 +957,10 @@ Example response format:
         return await self._generate_code_fix(query, code_snippets, analysis_context)
 
     async def analyze_code(self, code: str, original_query: Optional[str] = None) -> str:
-        if not self.provider:
-            logger.error("LLM Provider not available for code analysis.")
-            return "Error: LLM Provider not configured."
+        # This method uses self.generate_completion, which uses self.completion_provider
+        if not self.completion_provider:
+            logger.error("Completion LLM Provider not available for code analysis.")
+            return "Error: Completion LLM Provider not configured."
             
         system_prompt = "You are an expert code reviewer. Analyze the following code snippet(s) in the context of the user query, identify potential issues, suggest improvements, and explain the overall functionality."
         user_prompt = f"User Query (optional context): {original_query}\n\nCode to Analyze:\n```\n{code}\n```\n\nPlease provide a concise analysis:"
@@ -783,8 +977,9 @@ Example response format:
             return f"Error during analysis: {e}"
             
     async def generate_test(self, code: str, test_type: str = "unit") -> Dict[str, Any]:
-        if not self.provider:
-            return self._generate_error_response("LLM Provider not configured for test generation.")
+        # This method uses self.generate_completion, which uses self.completion_provider
+        if not self.completion_provider:
+            return self._generate_error_response("Completion LLM Provider not configured for test generation.")
 
         system_prompt = f"You are a test generation expert. Generate a {test_type} test case for the given code. Respond ONLY in valid JSON format like {{\"test_code\": \"...\", \"explanation\": \"...\"}}. Ensure code is properly escaped."
         user_prompt = f"Generate a {test_type} test for this code:\n```\n{code}\n```"
@@ -803,8 +998,9 @@ Example response format:
             return self._generate_error_response(f"Failed to generate test: {e}")
 
     async def explain_code(self, code: str, language: str) -> str:
-        if not self.provider:
-            return "Error: LLM Provider not configured."
+        # This method uses self.generate_completion, which uses self.completion_provider
+        if not self.completion_provider:
+             return "Error: Completion LLM Provider not configured."
 
         system_prompt = "You are an expert code explainer. Provide a clear and concise explanation of the given code snippet."
         user_prompt = f"Explain this {language} code:\n```\n{code}\n```"
@@ -831,19 +1027,25 @@ Example response format:
             # --- ENHANCE-007: Provide code context to Reflector --- 
             # Perform a quick initial search to get potential context
             initial_code_context = None
-            try:
-                # Simple search using the raw query - remove top_k if not supported
-                initial_snippets = await self.vector_store_manager.search_code(query, filter_dict={"type": "code_master"})
-                if initial_snippets:
-                    # Provide file paths as context
-                    file_paths = list(set([snippet.get('file_path', 'unknown') for snippet in initial_snippets]))
-                    initial_code_context = f"Potentially relevant files found: {', '.join(file_paths)}"
-                    logger.info(f"Providing initial code context to Reflector: {initial_code_context}")
-            except Exception as search_err:
-                 logger.warning(f"Initial context search failed: {search_err}")
+            # Ensure embedding provider is available before attempting search
+            if self.embedding_provider and self.vector_store_manager:
+                 try:
+                     # Simple search using the raw query
+                     initial_snippets = await self.vector_store_manager.search_code(query, filter_dict={"type": "code_master"})
+                     if initial_snippets:
+                         # Provide file paths as context
+                         file_paths = list(set([snippet.get('file_path', 'unknown') for snippet in initial_snippets]))
+                         initial_code_context = f"Potentially relevant files found: {', '.join(file_paths)}"
+                         logger.info(f"Providing initial code context to Reflector: {initial_code_context}")
+                 except RuntimeError as search_err: # Catch specific error if embedding provider failed
+                      logger.warning(f"Initial context search skipped: Embedding provider error: {search_err}")
+                 except Exception as search_err:
+                      logger.warning(f"Initial context search failed: {search_err}")
+            else:
+                 logger.warning("Skipping initial context search: Embedding provider or Vector Store Manager not available.")
             # --- End ENHANCE-007 --- 
 
-            # --- Call individual reflection and planning steps ---
+            # --- Call individual reflection and planning steps (using completion provider via self.reflector/self.planner) ---
             code_context_for_reflection = initial_code_context # Use the context found
 
             clarity_result = await self.reflector.assess_query_clarity(
@@ -867,7 +1069,7 @@ Example response format:
             )
 
             # Use the planner to create the plan
-            plan = await self.planner.create_initial_plan(
+            plan = await self.planner.create_plan(
                 query=query, 
                 extracted_keywords=keywords, 
                 decomposed_queries=decomposed_queries
@@ -926,3 +1128,34 @@ Example response format:
 
         logger.info(f"Agent run finished for query '{query[:50]}...' Status: {response_data.get('status')}")
         return response_data 
+
+    # Add a cleanup method if clients create their own sessions
+    async def close_resources(self):
+         """Closes any resources managed by the agent, like network sessions."""
+         logger.info("Closing agent resources...")
+         closed_successfully = True
+         if isinstance(self.pypi_client, PyPiClient):
+             try:
+                 await self.pypi_client.close_session()
+                 logger.info("Closed PyPiClient session.")
+             except Exception as e:
+                 logger.error(f"Error closing PyPiClient session: {e}", exc_info=True)
+                 closed_successfully = False
+                 
+         # ---> Add NpmClient closing logic <--- 
+         if isinstance(self.npm_client, NpmClient):
+             try:
+                 await self.npm_client.close_session()
+                 logger.info("Closed NpmClient session.")
+             except Exception as e:
+                 logger.error(f"Error closing NpmClient session: {e}", exc_info=True)
+                 closed_successfully = False
+         # ---> END NpmClient closing logic <--- 
+
+         # Add closing logic for GoProxyClient, NuGetClient, DocScraper, LlmInfoExtractor if they manage resources
+         # ... rest of close_resources ...
+
+         if closed_successfully:
+              logger.info("Agent resources closed successfully.")
+         else:
+              logger.warning("Some agent resources failed to close properly.") 

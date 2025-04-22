@@ -5,8 +5,36 @@ import re # Added import for regular expressions
 
 if TYPE_CHECKING:
     from app.services.code_agent import LLMProvider
+    # Add ProactiveIssue import for type hinting
+    from analysis.proactive_analyzer import ProactiveIssue 
 
 logger = logging.getLogger(__name__)
+
+# Define constants for plan steps
+STEP_ASSESS_CLARITY = "Assess Clarity"
+STEP_EXTRACT_KEYWORDS = "Extract Keywords"
+STEP_DECOMPOSE_QUERY = "Decompose Query"
+# Search Steps
+STEP_SEARCH_CODE_VECTOR = "Search Code (Vector)"
+STEP_SEARCH_CODE_TEXT = "Search Code (Text)" # Potentially needed for specific keyword searches
+STEP_SEARCH_PKG_MANAGER = "Search Package Manager"
+STEP_WEB_SEARCH = "Web Search"
+STEP_GITHUB_SEARCH = "GitHub Search"
+STEP_STACKOVERFLOW_SEARCH = "Stack Overflow Search"
+# Data Fetching/Processing Steps
+STEP_FETCH_DOCS_URL = "Fetch Documentation URL"
+STEP_SCRAPE_DOCS = "Scrape Documentation"
+STEP_EXTRACT_LLM = "Extract Info (LLM)"
+STEP_CHECK_VULNS = "Check Vulnerabilities"
+# Analysis & Action Steps
+STEP_ANALYZE_CODE = "Analyze Code & Context"
+STEP_GENERATE_FIX = "Generate Fix"
+STEP_APPLY_FIX = "Apply Fix"
+STEP_VALIDATE_CODE = "Validate Code"
+STEP_UPDATE_DEPENDENCY_FILE = "Update Dependency File" # Re-enabled this step
+
+STEP_USER_CONFIRMATION = "Request User Confirmation" # Potential future step
+STEP_FINAL_REPORT = "Generate Final Report"
 
 class Planner:
     """Agent responsible for creating execution plans."""
@@ -19,110 +47,179 @@ class Planner:
         """
         self.provider = provider # Store provider for future LLM-based planning
 
-    async def create_initial_plan(self, query: str, extracted_keywords: List[str], decomposed_queries: List[str]) -> List[Dict[str, Any]]:
-        """Create an execution plan, potentially using the LLM to decide if web search is needed.
-
-        Args:
-            query: The original user query.
-            extracted_keywords: List of keywords extracted from the query.
-            decomposed_queries: List of sub-queries (or original query if not decomposed).
-
-        Returns:
-            A list of dictionaries, each representing a plan step.
+    async def create_plan(self, 
+                          query: Optional[str] = None, 
+                          extracted_keywords: Optional[List[str]] = None, 
+                          decomposed_queries: Optional[List[str]] = None,
+                          proactive_issues: Optional[List['ProactiveIssue']] = None
+                         ) -> List[Dict[str, Any]]:
         """
-        default_plan = [
-            {"step": "Assess Clarity"},
-            {"step": "Extract Keywords"},
-            {"step": "Decompose Query"},
-            {
-                "step": "Search Code (Vector Store)",
-                "query": query, # Default to original query
-                "use_keywords": True # Flag to indicate using keywords
-            },
-            {"step": "Analyze Code"},
-            {
-                "step": "Generate Fix (JSON Output)"
-            }
-        ]
+        Create an execution plan based on user query OR proactive issues.
+        Uses the LLM to decide steps.
+        """
+        
+        # Determine if this is a proactive run or user query run
+        is_proactive_run = bool(proactive_issues and not query)
+        run_type = "Proactive Issue Resolution" if is_proactive_run else "User Query"
+        
+        logger.info(f"Creating plan for: {run_type}")
+
+        # Define default plan based on run type (proactive needs different default)
+        if is_proactive_run:
+             # Default plan for proactive issues might just be analysis initially
+             # The LLM should generate the specific steps based on the issue type
+             default_plan = [
+                 # {"step": STEP_ANALYZE_CODE}, # Maybe start with analysis of the issue?
+                 # {"step": STEP_GENERATE_FIX}  # Or directly try to generate a fix?
+                 # Let's rely on the LLM prompt for proactive default for now. If it fails, return empty.
+                 [] 
+             ]
+             # Ensure proactive issues are serializable for the prompt
+             try:
+                 proactive_issues_str = json.dumps(proactive_issues, indent=2)
+             except TypeError:
+                 logger.error("Could not serialize proactive issues for LLM prompt.")
+                 proactive_issues_str = "[Error serializing issues]"
+        else:
+             # Keep the original default plan for user queries
+             default_plan = [
+                 {"step": STEP_ASSESS_CLARITY},
+                 {"step": STEP_EXTRACT_KEYWORDS},
+                 {"step": STEP_DECOMPOSE_QUERY},
+                 {
+                     "step": STEP_SEARCH_CODE_VECTOR,
+                     "query": query or "", 
+                     "use_keywords": True
+                 },
+                 {"step": STEP_ANALYZE_CODE},
+                 {"step": STEP_GENERATE_FIX}
+             ]
+             proactive_issues_str = "N/A" # Not applicable for user query
 
         if not self.provider:
-            logger.warning("LLM Provider not available for dynamic planning. Using default plan.")
-            return default_plan
+            logger.warning(f"LLM Provider not available for dynamic planning ({run_type}). Using default plan.")
+            return default_plan if not is_proactive_run else [] # Return empty for failed proactive planning
 
         try:
-            planning_prompt = f"""
-            Analyze the user query and context to determine the best plan to fulfill the request. 
-            The goal is to find relevant code and provide fixes or analysis, potentially applying the fixes.
-            Available steps: Assess Clarity, Extract Keywords, Decompose Query, Search Code (Vector Store), Analyze Code, Generate Fix (JSON Output), Web Search, Search GitHub, Search Stack Overflow, Apply Fix, Validate Code (Sandbox).
-
-            Consider the following:
-            - If the query asks for general information, latest updates, external documentation, or troubleshooting an error message not likely in the local codebase, include a 'Web Search' step.
-            - If the query seems like a common programming question, error, or 'how-to', include 'Search Stack Overflow'. Include a relevant 'language' tag if identifiable.
-            - If the query asks for code examples for a specific library/repo or mentions a GitHub repository, include 'Search GitHub'. Include a relevant 'language' tag if identifiable.
-            - Include 'Search Code (Vector Store)' to search the local codebase.
-            - Multiple search steps (Web, GitHub, Stack Overflow, Vector Store) can be included if relevant.
-            - Place search steps generally before 'Analyze Code'.
-            - 'Generate Fix (JSON Output)' should come after 'Analyze Code'.
-            - Include 'Validate Code (Sandbox)' after 'Generate Fix (JSON Output)' if code was generated and validation seems beneficial before applying.
-            - Include 'Apply Fix' only after 'Generate Fix (JSON Output)' and only if a fix involving a specific file path is likely to be generated.
-            - The plan should be a sequence of steps.
-
-            User Query: "{query}"
-            Keywords: {extracted_keywords}
-            Decomposed Queries: {decomposed_queries}
-
-            Output ONLY a valid JSON list of plan steps. Each step should be a dictionary with a 'step' key. 
-            If 'Search Code', 'Web Search', 'Search GitHub', or 'Search Stack Overflow' is included, add a 'query' key with the best query string to use. For GitHub and Stack Overflow, also add an optional 'language' key if a language/tag is relevant and identifiable.
-            Ensure 'Search Code' includes the 'use_keywords' boolean.
-            If 'Apply Fix' or 'Validate Code (Sandbox)' step is included, it does not need additional parameters in the plan itself; it will use the output of previous steps.
+            # === Construct the Planning Prompt ===
+            prompt_header = f"Analyze the context and determine the best plan to fulfill the request ({run_type})."
+            prompt_goal = "The goal is to find relevant code/information and provide fixes or analysis, potentially applying the fixes."
+            if is_proactive_run:
+                 prompt_goal = "The goal is to generate a plan to address the identified proactive issues, potentially generating and applying fixes."
+                 
+            available_steps = f"""
+            Available steps:
+            - Core: {STEP_ASSESS_CLARITY}, {STEP_EXTRACT_KEYWORDS}, {STEP_DECOMPOSE_QUERY}, {STEP_SEARCH_CODE_VECTOR}, {STEP_ANALYZE_CODE}, {STEP_GENERATE_FIX}, {STEP_APPLY_FIX}, {STEP_VALIDATE_CODE}.
+            - External Search: {STEP_WEB_SEARCH}, {STEP_GITHUB_SEARCH}, {STEP_STACKOVERFLOW_SEARCH}.
+            - Package/Docs/Vulns: {STEP_SEARCH_PKG_MANAGER}, {STEP_FETCH_DOCS_URL}, {STEP_SCRAPE_DOCS}, {STEP_EXTRACT_LLM}, {STEP_CHECK_VULNS}.
+            - File Update: {STEP_UPDATE_DEPENDENCY_FILE} (Use for applying dependency updates).
+            """
             
-            Example with Validation and Apply Fix:
-            [ {{"step": "Assess Clarity"}}, {{"step": "Extract Keywords"}}, {{"step": "Decompose Query"}}, {{"step": "Web Search", "query": "python requests library SOCKS proxy"}}, {{"step": "Search Stack Overflow", "query": "python requests SOCKS proxy configuration", "language": "python"}}, {{"step": "Search Code (Vector Store)", "query": "proxy configuration requests", "use_keywords": true}}, {{"step": "Analyze Code"}}, {{"step": "Generate Fix (JSON Output)"}}, {{"step": "Validate Code (Sandbox)"}}, {{"step": "Apply Fix"}} ]
-            Example for local search only:
-            [ {{"step": "Assess Clarity"}}, {{"step": "Extract Keywords"}}, {{"step": "Decompose Query"}}, {{"step": "Search Code (Vector Store)", "query": "{query}", "use_keywords": true}}, {{"step": "Analyze Code"}}, {{"step": "Generate Fix (JSON Output)"}} ]
+            guidelines = f"""
+            Guidelines:
+            {'1. If user query: Always start with: ' + STEP_ASSESS_CLARITY + ', ' + STEP_EXTRACT_KEYWORDS + ', ' + STEP_DECOMPOSE_QUERY + '.' if not is_proactive_run else '1. If proactive issues: Analyze the issues and generate appropriate steps directly.'}
+            2.  Include {STEP_SEARCH_CODE_VECTOR} to search the local codebase if understanding local context or usage is needed (e.g., before updating a dependency).
+            3.  External Search: 
+                - Use {STEP_WEB_SEARCH} for general info, latest updates, external docs, troubleshooting errors.
+                - Use {STEP_STACKOVERFLOW_SEARCH} for common programming questions/errors/how-tos (add 'language' tag).
+                - Use {STEP_GITHUB_SEARCH} for finding code examples in specific repos or searching GitHub broadly (add 'language' tag).
+            4.  Package/Docs/Vulns (Use when query or issue implies specific library/package interaction):
+                - Use {STEP_SEARCH_PKG_MANAGER} to find info about a package. Requires 'manager_type' and 'query'.
+                - Use {STEP_FETCH_DOCS_URL} *after* finding a package/repo to get its documentation URL. Requires 'source_type' and 'package_name'.
+                - Use {STEP_SCRAPE_DOCS} *after* {STEP_FETCH_DOCS_URL}. Requires 'url'.
+                - Use {STEP_EXTRACT_LLM} *after* {STEP_SCRAPE_DOCS} or getting other text content. Requires 'prompt_key'.
+                - Use {STEP_CHECK_VULNS} to check for vulnerabilities. Requires 'source_type', 'package_name', 'version'.
+            5.  Analysis/Fix:
+                - Place search/data gathering steps generally *before* {STEP_ANALYZE_CODE}.
+                - {STEP_ANALYZE_CODE} should consolidate information gathered about the query or issue.
+                - {STEP_GENERATE_FIX} should follow {STEP_ANALYZE_CODE}.
+                - If the fix involves updating a dependency file, {STEP_GENERATE_FIX} might output parameters for {STEP_UPDATE_DEPENDENCY_FILE}.
+                - {STEP_UPDATE_DEPENDENCY_FILE} updates the dependency file directly. Requires 'file_path', 'package_name', 'new_version'.
+                - {STEP_VALIDATE_CODE} can follow {STEP_GENERATE_FIX} or {STEP_UPDATE_DEPENDENCY_FILE} if validation is beneficial.
+                - {STEP_APPLY_FIX} applies general code fixes generated by {STEP_GENERATE_FIX}.
+            6.  Parameter Requirements: (List specific requirements as before)
+                - {STEP_UPDATE_DEPENDENCY_FILE} needs 'file_path', 'package_name', 'new_version'.
+                (Add requirements for other steps here)
+            """
+            
+            # Define context_section and output_instructions before they are used
+            context_section = f"""
+            {'--- User Query Context ---' if not is_proactive_run else '--- Proactive Issues Context ---'}
+            {'User Query: "' + (query or 'N/A') + '"' if not is_proactive_run else ''}
+            {'Keywords: ' + str(extracted_keywords or []) if not is_proactive_run else ''}
+            {'Decomposed Queries: ' + str(decomposed_queries or []) if not is_proactive_run else ''}
+            {'Proactive Issues Found:' + proactive_issues_str if is_proactive_run else ''}
+            """
+            output_instructions = f"""
+            Output ONLY a valid JSON list of plan step dictionaries.
+            Example (Proactive: Update outdated 'requests' lib in requirements.txt):
+            [ 
+              {{ # Optionally check vulnerabilities first
+                "step": "{STEP_CHECK_VULNS}", "source_type": "pypi", "package_name": "requests", "version": "[from issue context]" 
+              }}, 
+              {{ # Search local usage before update
+                "step": "{STEP_SEARCH_CODE_VECTOR}", "query": "Usage of requests library", "use_keywords": false 
+              }},
+              {{ # Analyze potential impact
+                "step": "{STEP_ANALYZE_CODE}" 
+              }},
+              {{ # Generate the file update instruction (alternative to generic fix)
+                "step": "{STEP_UPDATE_DEPENDENCY_FILE}", "file_path": "[from issue context]", "package_name": "requests", "new_version": "[from issue context]"
+              }}
+              {{ # Optionally validate after update (e.g., run tests)
+                # "step": "{STEP_VALIDATE_CODE}" 
+              }} 
+            ]
 
             Return ONLY the JSON list.
             """
+            
+            planning_prompt = f"{prompt_header}\n{prompt_goal}\n\n{available_steps}\n\n{guidelines}\n\n{context_section}\n\n{output_instructions}"
 
             messages = [
-                {"role": "system", "content": "You are a planning assistant. Generate a JSON plan based on the user query and context."}, 
+                {"role": "system", "content": "You are a planning assistant. Generate a JSON plan based on the provided context (user query or proactive issues), following the guidelines and available steps."}, 
                 {"role": "user", "content": planning_prompt}
             ]
 
             raw_response = await self.provider.generate_completion(messages, temperature=0.1)
             
-            # Basic cleaning for potential markdown fences
-            cleaned_response = re.sub(r"^```(?:json)?\s*", "", raw_response, flags=re.MULTILINE)
-            cleaned_response = re.sub(r"\s*```$", "", cleaned_response, flags=re.MULTILINE).strip()
+            # Attempt to extract JSON even if there's surrounding text
+            json_match = re.search(r'\[.*\]', raw_response, re.DOTALL)
+            if json_match:
+                 cleaned_response = json_match.group(0)
+            else:
+                 # Fallback to previous cleaning attempt if no clear JSON list is found
+                 cleaned_response = re.sub(r"^```(?:json)?\s*", "", raw_response, flags=re.MULTILINE)
+                 cleaned_response = re.sub(r"\s*```$", "", cleaned_response, flags=re.MULTILINE).strip()
+
 
             plan = json.loads(cleaned_response)
 
-            # Basic validation
             if isinstance(plan, list) and all(isinstance(item, dict) and 'step' in item for item in plan):
-                logger.info(f"Generated dynamic plan using LLM for query: '{query}'")
-                # Ensure essential steps are present if LLM missed them (basic safety net)
-                required_steps = {"Assess Clarity", "Extract Keywords", "Decompose Query", "Search Code (Vector Store)", "Analyze Code", "Generate Fix (JSON Output)"}
-                plan_steps = {item['step'] for item in plan}
-                if not required_steps.issubset(plan_steps) and "Web Search" not in plan_steps: # Allow web search to sometimes replace code search
-                    logger.warning("LLM plan missing required steps, falling back to default plan.")
-                    return default_plan
-                    
-                # Ensure Search Code step has necessary args if present
+                logger.info(f"Generated dynamic plan using LLM for {run_type}.")
+                # Basic safety net for user queries
+                if not is_proactive_run:
+                     core_steps = {STEP_ASSESS_CLARITY, STEP_EXTRACT_KEYWORDS, STEP_DECOMPOSE_QUERY}
+                     plan_steps_set = {item['step'] for item in plan}
+                     if not core_steps.issubset(plan_steps_set):
+                          logger.warning(f"LLM plan for user query missing core reflection steps, falling back to default.")
+                          return default_plan
+                
+                # Ensure required parameters are defaulted if possible/sensible 
                 for step in plan:
-                    if step['step'] == "Search Code (Vector Store)":
-                        step.setdefault('query', query) # Default query if missing
-                        step.setdefault('use_keywords', True) # Default to using keywords
-                    if step['step'] == "Web Search":
-                         step.setdefault('query', query) # Default query if missing
+                    if step['step'] == STEP_SEARCH_CODE_VECTOR:
+                        step.setdefault('query', query or "Analyze code context") # Default query if user query is None
+                        step.setdefault('use_keywords', True if extracted_keywords else False)
+                    # Add more default logic here if needed for other steps
                          
                 return plan
             else:
-                logger.warning("LLM generated invalid plan structure. Falling back to default plan.")
-                return default_plan
+                logger.warning(f"LLM generated invalid plan structure for {run_type}. Falling back to default plan.")
+                return default_plan if not is_proactive_run else []
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse plan JSON from LLM: {e}. Response: '{raw_response[:100]}...' Falling back to default plan.")
-            return default_plan
+            logger.error(f"Failed to parse plan JSON from LLM for {run_type}: {e}. Response: '{raw_response[:200]}...' Falling back to default plan.")
+            return default_plan if not is_proactive_run else []
         except Exception as e:
-            logger.error(f"Error during dynamic planning: {e}. Falling back to default plan.", exc_info=True)
-            return default_plan 
+            logger.error(f"Error during dynamic planning for {run_type}: {e}. Falling back to default plan.", exc_info=True)
+            return default_plan if not is_proactive_run else [] 
