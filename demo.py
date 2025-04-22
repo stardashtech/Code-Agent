@@ -10,10 +10,10 @@ from pprint import pformat
 from app.config import settings
 from app.services.code_agent import CodeAgent, Config
 # Import components to test directly
-from utils.dependency_parser import DependencyParser, DependencyParserError
-from services.code_differ import CodeDiffer, CodeDifferError
-from utils import git_utils # Import for checking GitPython availability, though we'll use subprocess
-from models.llm import get_llm_client
+from app.utils.dependency_parser import DependencyParser, DependencyParserError
+from app.services.code_differ import CodeDiffer, CodeDifferError
+from app.utils import git_utils # Import for checking GitPython availability, though we'll use subprocess
+from app.models.llm import get_llm_client
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 logger = logging.getLogger(__name__)

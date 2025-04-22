@@ -1,4 +1,4 @@
-from agent.agent import CodeAgent
+from app.services.code_agent import CodeAgent
 
 def main():
     # Example user query

@@ -3,7 +3,9 @@ import os
 import shutil
 import json
 import time # Add time import for unique branch names
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Callable, Awaitable
 
 # Import config
 from config import settings
@@ -34,22 +36,22 @@ from app.agents.planner import (
 )
 
 # Import necessary utilities and services
-from utils import git_utils # Import the git utils
+from app.utils import git_utils # Import the git utils
 # from .validation_service import ValidationService # Incorrect relative import
 # Assuming ValidationService is in the top-level 'services' directory
-import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))) # Add workspace root to path
-from services.validation_service import ValidationService 
+# import sys
+# sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))) # Add workspace root to path
+from app.services.validation_service import ValidationService
 
 # Import client types for type hinting (optional but good practice)
-from clients.github_client import GitHubApiClient
-from clients.pypi_client import PyPiClient
-from clients.npm_client import NpmClient
-from clients.go_proxy_client import GoProxyClient
-from clients.nuget_client import NuGetClient
-from utils.doc_scraper import DocumentationScraper
-from tools.llm_info_extractor import LlmInfoExtractor
-from interfaces.api_client import ExternalApiClient # Base class
+from app.tools.github_search import GitHubSearchProvider
+from app.tools.pypi_client import PyPiClient
+from app.tools.npm_client import NpmClient
+from app.tools.go_proxy_client import GoProxyClient
+from app.tools.nuget_client import NuGetClient
+from app.services.doc_scraper import DocumentationScraper
+from app.services.llm_info_extractor import LlmInfoExtractor
+# from app.interfaces.api_client import ExternalApiClient
 
 # Use TYPE_CHECKING to avoid circular import issues
 if TYPE_CHECKING:
@@ -82,7 +84,7 @@ class PlanExecutor:
         if not self._vector_store_manager:
              logger.warning("PlanExecutor initialized without a Vector Store Manager. Code search capabilities might be limited.")
 
-    def _get_package_client(self, manager_type: str) -> Optional[ExternalApiClient]:
+    def _get_package_client(self, manager_type: str) -> Optional[Any]:
         """Helper to get the correct package manager client based on type."""
         if manager_type == 'pypi':
             return self._pypi_client

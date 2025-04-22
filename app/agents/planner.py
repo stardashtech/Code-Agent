@@ -1,12 +1,13 @@
 import logging
-from typing import TYPE_CHECKING, List, Dict, Optional, Any
-import json # Added import for JSON parsing
-import re # Added import for regular expressions
+from typing import TYPE_CHECKING, List, Dict, Optional, Any, Tuple
+import json
+import re
+from enum import Enum
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from app.services.code_agent import LLMProvider
-    # Add ProactiveIssue import for type hinting
-    from analysis.proactive_analyzer import ProactiveIssue 
+    from app.agents.reflector import QueryType
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +15,10 @@ logger = logging.getLogger(__name__)
 STEP_ASSESS_CLARITY = "Assess Clarity"
 STEP_EXTRACT_KEYWORDS = "Extract Keywords"
 STEP_DECOMPOSE_QUERY = "Decompose Query"
+STEP_ANALYZE_INTENT = "Analyze Intent"
 # Search Steps
 STEP_SEARCH_CODE_VECTOR = "Search Code (Vector)"
-STEP_SEARCH_CODE_TEXT = "Search Code (Text)" # Potentially needed for specific keyword searches
+STEP_SEARCH_CODE_TEXT = "Search Code (Text)"
 STEP_SEARCH_PKG_MANAGER = "Search Package Manager"
 STEP_WEB_SEARCH = "Web Search"
 STEP_GITHUB_SEARCH = "GitHub Search"
@@ -31,195 +33,808 @@ STEP_ANALYZE_CODE = "Analyze Code & Context"
 STEP_GENERATE_FIX = "Generate Fix"
 STEP_APPLY_FIX = "Apply Fix"
 STEP_VALIDATE_CODE = "Validate Code"
-STEP_UPDATE_DEPENDENCY_FILE = "Update Dependency File" # Re-enabled this step
+STEP_UPDATE_DEPENDENCY_FILE = "Update Dependency File"
 
-STEP_USER_CONFIRMATION = "Request User Confirmation" # Potential future step
+STEP_USER_CONFIRMATION = "Request User Confirmation"
 STEP_FINAL_REPORT = "Generate Final Report"
 
+# Planning steps
+STEP_ANALYZE_INTENT = "analyze_intent"
+STEP_SEARCH_CODE_TEXT = "search_code_text"
+STEP_SEARCH_CODE_SEMANTIC = "search_code_semantic"
+STEP_SEARCH_GITHUB = "search_github"
+STEP_SEARCH_WEB = "search_web"
+STEP_ANALYZE_ERROR = "analyze_error"
+STEP_IMPLEMENT_FIX = "implement_fix"
+STEP_IMPLEMENT_FEATURE = "implement_feature"
+STEP_REFACTOR_CODE = "refactor_code"
+STEP_OPTIMIZE_CODE = "optimize_code"
+STEP_UPDATE_DEPENDENCIES = "update_dependencies"
+STEP_VERIFY_CHANGES = "verify_changes"
+STEP_EXPLAIN_CODE = "explain_code"
+STEP_GENERATE_TESTS = "generate_tests"
+
+class PlanType(Enum):
+    """Different types of plans that can be created."""
+    ERROR_FIXING = "error_fixing"
+    FEATURE_IMPLEMENTATION = "feature_implementation"
+    CODE_REFACTORING = "code_refactoring"
+    PERFORMANCE_OPTIMIZATION = "performance_optimization"
+    DEPENDENCY_MANAGEMENT = "dependency_management"
+    CODE_EXPLANATION = "code_explanation"
+    GENERAL = "general"
+    
+class PlanStep(BaseModel):
+    """Model representing a step in an execution plan."""
+    step: str
+    description: str
+    inputs: List[str]
+    outputs: List[str]
+    estimated_time: Optional[int] = None
+    critical: bool = False
+    
+class ExecutionPlan(BaseModel):
+    """Model representing a complete execution plan."""
+    plan_type: str
+    steps: List[PlanStep]
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    
+    def add_step(self, step: PlanStep) -> None:
+        """Add a step to the plan."""
+        self.steps.append(step)
+        
+    def insert_step(self, index: int, step: PlanStep) -> None:
+        """Insert a step at a specific position."""
+        self.steps.insert(index, step)
+        
+    def remove_step(self, step_name: str) -> None:
+        """Remove a step from the plan."""
+        self.steps = [s for s in self.steps if s.step != step_name]
+        
+    def get_step(self, step_name: str) -> Optional[PlanStep]:
+        """Get a step by name."""
+        for step in self.steps:
+            if step.step == step_name:
+                return step
+        return None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the plan to a dictionary."""
+        return {
+            "plan_type": self.plan_type,
+            "steps": [step.dict() for step in self.steps],
+            "metadata": self.metadata
+        }
+
 class Planner:
-    """Agent responsible for creating execution plans."""
+    """
+    Agent responsible for planning an execution strategy to resolve a user's query.
+    
+    Features:
+    - Adaptive prompt templates based on query intent and type
+    - Multiple plan templates for different query types
+    - Integration with Reflector's intent analysis
+    - Structured execution step generation
+    - Dynamic plan modification based on query complexity
+    """
 
     def __init__(self, provider: Optional['LLMProvider'] = None):
         """Initialize the Planner agent.
 
         Args:
-            provider: Optional instance of an LLMProvider. Needed for advanced planning.
+            provider: Optional instance of an LLMProvider. Required to perform planning.
         """
-        self.provider = provider # Store provider for future LLM-based planning
-
-    async def create_plan(self, 
-                          query: Optional[str] = None, 
-                          extracted_keywords: Optional[List[str]] = None, 
-                          decomposed_queries: Optional[List[str]] = None,
-                          proactive_issues: Optional[List['ProactiveIssue']] = None
-                         ) -> List[Dict[str, Any]]:
-        """
-        Create an execution plan based on user query OR proactive issues.
-        Uses the LLM to decide steps.
-        """
+        self.provider = provider
         
-        # Determine if this is a proactive run or user query run
-        is_proactive_run = bool(proactive_issues and not query)
-        run_type = "Proactive Issue Resolution" if is_proactive_run else "User Query"
+        # Base system prompt that will be customized per request
+        self._base_system_prompt = """You are an expert planning system for a code assistant agent. 
+Your task is to create a detailed execution plan for resolving a user's query about code or development.
+
+The plan should consist of well-defined steps that achieve the user's goal efficiently.
+Use your knowledge of software development, debugging, and implementation to create appropriate plans.
+
+For each step, provide:
+1. Step identifier (use one of the provided step types)
+2. Clear description of what this step accomplishes
+3. Required inputs for this step
+4. Expected outputs from this step
+5. Estimated time to complete (in minutes)
+6. Whether this step is critical for success (true/false)
+
+{additional_context}
+
+Available step types:
+- analyze_intent: Understand user intent and requirements
+- search_code_text: Text-based code search
+- search_code_semantic: Semantic code search
+- search_github: Search GitHub for examples
+- search_web: Search web for information
+- analyze_error: Analyze error messages and traces
+- implement_fix: Implement code fixes
+- implement_feature: Implement new features
+- refactor_code: Refactor existing code
+- optimize_code: Optimize for performance
+- update_dependencies: Update project dependencies
+- verify_changes: Verify code changes work correctly
+- explain_code: Explain code functionality
+- generate_tests: Generate tests for code
+
+Create a focused plan with 3-7 steps that addresses the user's query efficiently.
+Return ONLY a JSON array containing the plan steps.
+"""
+    
+    def _get_error_fixing_template(self) -> ExecutionPlan:
+        """Return a template for error fixing plans."""
+        return ExecutionPlan(
+            plan_type=PlanType.ERROR_FIXING.value,
+            steps=[
+                PlanStep(
+                    step=STEP_ANALYZE_INTENT,
+                    description="Analyze the error message and context to understand the problem",
+                    inputs=["query", "conversation_history", "code_context"],
+                    outputs=["error_type", "affected_files", "probable_causes"],
+                    estimated_time=3,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_CODE_TEXT,
+                    description="Search for the error location in the codebase",
+                    inputs=["error_message", "affected_files"],
+                    outputs=["error_context", "related_code"],
+                    estimated_time=2,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_ANALYZE_ERROR,
+                    description="Analyze the error context to determine the cause",
+                    inputs=["error_context", "related_code", "error_type"],
+                    outputs=["root_cause", "fix_approach"],
+                    estimated_time=5,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_IMPLEMENT_FIX,
+                    description="Implement the fix for the identified error",
+                    inputs=["root_cause", "fix_approach", "affected_files"],
+                    outputs=["code_changes"],
+                    estimated_time=8,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_VERIFY_CHANGES,
+                    description="Verify that the changes resolve the error",
+                    inputs=["code_changes", "affected_files"],
+                    outputs=["verification_result"],
+                    estimated_time=4,
+                    critical=True
+                )
+            ]
+        )
+    
+    def _get_feature_implementation_template(self) -> ExecutionPlan:
+        """Return a template for feature implementation plans."""
+        return ExecutionPlan(
+            plan_type=PlanType.FEATURE_IMPLEMENTATION.value,
+            steps=[
+                PlanStep(
+                    step=STEP_ANALYZE_INTENT,
+                    description="Analyze the feature request to understand requirements",
+                    inputs=["query", "conversation_history", "code_context"],
+                    outputs=["feature_requirements", "affected_components"],
+                    estimated_time=5,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_CODE_SEMANTIC,
+                    description="Search for relevant code components to integrate with",
+                    inputs=["affected_components", "feature_requirements"],
+                    outputs=["integration_points", "existing_patterns"],
+                    estimated_time=3,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_GITHUB,
+                    description="Search for examples or best practices for implementation",
+                    inputs=["feature_requirements", "programming_language"],
+                    outputs=["reference_implementations", "best_practices"],
+                    estimated_time=4,
+                    critical=False
+                ),
+                PlanStep(
+                    step=STEP_IMPLEMENT_FEATURE,
+                    description="Implement the requested feature",
+                    inputs=["feature_requirements", "integration_points", "existing_patterns", "best_practices"],
+                    outputs=["code_changes", "new_files"],
+                    estimated_time=15,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_GENERATE_TESTS,
+                    description="Generate tests for the new feature",
+                    inputs=["code_changes", "new_files", "feature_requirements"],
+                    outputs=["test_code"],
+                    estimated_time=8,
+                    critical=False
+                ),
+                PlanStep(
+                    step=STEP_VERIFY_CHANGES,
+                    description="Verify that the implementation meets requirements",
+                    inputs=["code_changes", "new_files", "test_code", "feature_requirements"],
+                    outputs=["verification_result"],
+                    estimated_time=5,
+                    critical=True
+                )
+            ]
+        )
+    
+    def _get_code_refactoring_template(self) -> ExecutionPlan:
+        """Return a template for code refactoring plans."""
+        return ExecutionPlan(
+            plan_type=PlanType.CODE_REFACTORING.value,
+            steps=[
+                PlanStep(
+                    step=STEP_ANALYZE_INTENT,
+                    description="Analyze the refactoring request to understand goals",
+                    inputs=["query", "conversation_history", "code_context"],
+                    outputs=["refactoring_goals", "affected_components"],
+                    estimated_time=4,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_CODE_SEMANTIC,
+                    description="Search for code components that need refactoring",
+                    inputs=["affected_components", "refactoring_goals"],
+                    outputs=["refactoring_targets", "code_dependencies"],
+                    estimated_time=3,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_GITHUB,
+                    description="Search for refactoring patterns and best practices",
+                    inputs=["refactoring_goals", "programming_language"],
+                    outputs=["refactoring_patterns", "best_practices"],
+                    estimated_time=3,
+                    critical=False
+                ),
+                PlanStep(
+                    step=STEP_REFACTOR_CODE,
+                    description="Refactor the identified code components",
+                    inputs=["refactoring_targets", "refactoring_patterns", "code_dependencies"],
+                    outputs=["code_changes"],
+                    estimated_time=12,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_VERIFY_CHANGES,
+                    description="Verify that the refactoring maintains functionality",
+                    inputs=["code_changes", "refactoring_targets"],
+                    outputs=["verification_result"],
+                    estimated_time=5,
+                    critical=True
+                )
+            ]
+        )
+    
+    def _get_performance_optimization_template(self) -> ExecutionPlan:
+        """Return a template for performance optimization plans."""
+        return ExecutionPlan(
+            plan_type=PlanType.PERFORMANCE_OPTIMIZATION.value,
+            steps=[
+                PlanStep(
+                    step=STEP_ANALYZE_INTENT,
+                    description="Analyze the optimization request to understand performance issues",
+                    inputs=["query", "conversation_history", "code_context"],
+                    outputs=["performance_issues", "affected_components"],
+                    estimated_time=5,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_CODE_SEMANTIC,
+                    description="Search for code components with performance bottlenecks",
+                    inputs=["affected_components", "performance_issues"],
+                    outputs=["bottleneck_locations", "performance_metrics"],
+                    estimated_time=4,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_WEB,
+                    description="Search for optimization strategies for specific issues",
+                    inputs=["performance_issues", "programming_language"],
+                    outputs=["optimization_strategies", "best_practices"],
+                    estimated_time=3,
+                    critical=False
+                ),
+                PlanStep(
+                    step=STEP_OPTIMIZE_CODE,
+                    description="Implement performance optimizations",
+                    inputs=["bottleneck_locations", "optimization_strategies"],
+                    outputs=["code_changes"],
+                    estimated_time=10,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_VERIFY_CHANGES,
+                    description="Verify performance improvements",
+                    inputs=["code_changes", "bottleneck_locations", "performance_metrics"],
+                    outputs=["verification_result", "performance_impact"],
+                    estimated_time=6,
+                    critical=True
+                )
+            ]
+        )
+    
+    def _get_dependency_management_template(self) -> ExecutionPlan:
+        """Return a template for dependency management plans."""
+        return ExecutionPlan(
+            plan_type=PlanType.DEPENDENCY_MANAGEMENT.value,
+            steps=[
+                PlanStep(
+                    step=STEP_ANALYZE_INTENT,
+                    description="Analyze the dependency request to understand requirements",
+                    inputs=["query", "conversation_history", "code_context"],
+                    outputs=["dependency_requirements", "affected_components"],
+                    estimated_time=3,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_CODE_TEXT,
+                    description="Search for existing dependency configurations",
+                    inputs=["affected_components"],
+                    outputs=["dependency_files", "current_dependencies"],
+                    estimated_time=2,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_WEB,
+                    description="Search for dependency information and compatibility",
+                    inputs=["dependency_requirements"],
+                    outputs=["dependency_versions", "compatibility_info"],
+                    estimated_time=3,
+                    critical=False
+                ),
+                PlanStep(
+                    step=STEP_UPDATE_DEPENDENCIES,
+                    description="Update dependency configurations",
+                    inputs=["dependency_files", "current_dependencies", "dependency_requirements", "dependency_versions"],
+                    outputs=["config_changes"],
+                    estimated_time=5,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_VERIFY_CHANGES,
+                    description="Verify dependency changes for compatibility",
+                    inputs=["config_changes", "compatibility_info"],
+                    outputs=["verification_result"],
+                    estimated_time=4,
+                    critical=True
+                )
+            ]
+        )
+    
+    def _get_code_explanation_template(self) -> ExecutionPlan:
+        """Return a template for code explanation plans."""
+        return ExecutionPlan(
+            plan_type=PlanType.CODE_EXPLANATION.value,
+            steps=[
+                PlanStep(
+                    step=STEP_ANALYZE_INTENT,
+                    description="Analyze the explanation request to understand focus areas",
+                    inputs=["query", "conversation_history", "code_context"],
+                    outputs=["explanation_focus", "code_components"],
+                    estimated_time=3,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_CODE_SEMANTIC,
+                    description="Search for relevant code to explain",
+                    inputs=["code_components", "explanation_focus"],
+                    outputs=["relevant_code", "code_relationships"],
+                    estimated_time=3,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_EXPLAIN_CODE,
+                    description="Generate a clear explanation of the code",
+                    inputs=["relevant_code", "code_relationships", "explanation_focus"],
+                    outputs=["code_explanation", "visual_diagrams"],
+                    estimated_time=10,
+                    critical=True
+                )
+            ]
+        )
+    
+    def _get_general_template(self) -> ExecutionPlan:
+        """Return a general purpose plan template."""
+        return ExecutionPlan(
+            plan_type=PlanType.GENERAL.value,
+            steps=[
+                PlanStep(
+                    step=STEP_ANALYZE_INTENT,
+                    description="Analyze the query to understand requirements",
+                    inputs=["query", "conversation_history", "code_context"],
+                    outputs=["query_type", "key_requirements"],
+                    estimated_time=3,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_CODE_SEMANTIC,
+                    description="Search for relevant code components",
+                    inputs=["key_requirements"],
+                    outputs=["relevant_code", "code_context"],
+                    estimated_time=3,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_WEB,
+                    description="Search for relevant information if needed",
+                    inputs=["key_requirements", "relevant_code"],
+                    outputs=["reference_information", "best_practices"],
+                    estimated_time=3,
+                    critical=False
+                )
+            ]
+        )
+    
+    def _generate_plan_template_from_query_type(self, query_type: 'QueryType') -> ExecutionPlan:
+        """
+        Generate a plan template based on the query type from the Reflector.
         
-        logger.info(f"Creating plan for: {run_type}")
+        Args:
+            query_type: The type of query as determined by Reflector
+            
+        Returns:
+            An appropriate plan template for the query type
+        """
+        from app.agents.reflector import QueryType
+        
+        # Map query types to plan templates
+        if query_type == QueryType.ERROR_ANALYSIS:
+            return self._get_error_fixing_template()
+        elif query_type == QueryType.FEATURE_REQUEST:
+            return self._get_feature_implementation_template()
+        elif query_type == QueryType.CODE_SPECIFIC:
+            # Determine if it's more like refactoring or explanation
+            # For now, default to explanation
+            return self._get_code_explanation_template()
+        elif query_type == QueryType.DEPENDENCY:
+            return self._get_dependency_management_template()
+        else:  # QueryType.GENERAL or unknown
+            return self._get_general_template()
+    
+    def _adapt_template_to_context(self, template: ExecutionPlan, 
+                                 intent_analysis: Dict[str, Any],
+                                 clarity_assessment: Dict[str, Any]) -> ExecutionPlan:
+        """
+        Adapt a plan template based on the intent analysis, clarity assessment and context.
+        
+        Args:
+            template: The base template to adapt
+            intent_analysis: The intent analysis results
+            clarity_assessment: The clarity assessment results
+            
+        Returns:
+            Adapted template with context-specific modifications
+        """
+        adapted_plan = ExecutionPlan(
+            plan_type=template.plan_type,
+            steps=template.steps.copy(),
+            metadata=template.metadata.copy()
+        )
+        
+        # Store analysis data in metadata
+        adapted_plan.metadata["intent_analysis"] = intent_analysis
+        adapted_plan.metadata["clarity_assessment"] = clarity_assessment
+        
+        # If query is unclear, add clarification steps
+        if clarity_assessment.get("is_clear", True) is False:
+            # Add a clarification step at the beginning
+            clarification_step = PlanStep(
+                step="request_clarification",
+                description="Request clarification from the user on ambiguous aspects",
+                inputs=["query", "ambiguities", "missing_context"],
+                outputs=["clarified_query", "additional_context"],
+                estimated_time=1,
+                critical=True
+            )
+            adapted_plan.insert_step(0, clarification_step)
+            adapted_plan.metadata["requires_clarification"] = True
+        
+        # Add web search step if external resources are needed
+        if intent_analysis.get("planning_insights", {}).get("external_resources_needed", False):
+            if not any(step.step == STEP_SEARCH_WEB for step in adapted_plan.steps):
+                web_search_step = PlanStep(
+                    step=STEP_SEARCH_WEB,
+                    description="Search for additional information or best practices",
+                    inputs=["query", "key_requirements"],
+                    outputs=["reference_information", "best_practices"],
+                    estimated_time=3,
+                    critical=False
+                )
+                # Insert after the first step (usually analysis)
+                adapted_plan.insert_step(1, web_search_step)
+        
+        # Add code semantic search if deep analysis is required
+        if intent_analysis.get("planning_insights", {}).get("analysis_depth_required") == "deep":
+            if not any(step.step == STEP_SEARCH_CODE_SEMANTIC for step in adapted_plan.steps):
+                code_search_step = PlanStep(
+                    step=STEP_SEARCH_CODE_SEMANTIC,
+                    description="Perform deep semantic code search for related components",
+                    inputs=["query", "affected_components"],
+                    outputs=["related_code", "code_dependencies"],
+                    estimated_time=4,
+                    critical=True
+                )
+                # Insert early in the plan
+                adapted_plan.insert_step(1, code_search_step)
+        
+        # Add verification step if it's a critical operation
+        primary_intent = intent_analysis.get("primary_intent", "other")
+        if primary_intent in ["fix_error", "implement_feature", "optimize_performance"] and not any(step.step == STEP_VERIFY_CHANGES for step in adapted_plan.steps):
+            verification_step = PlanStep(
+                step=STEP_VERIFY_CHANGES,
+                description="Verify that the changes function correctly",
+                inputs=["code_changes", "requirements"],
+                outputs=["verification_result"],
+                estimated_time=5,
+                critical=True
+            )
+            adapted_plan.steps.append(verification_step)
+            
+        # Add test generation for new features if needed
+        if primary_intent == "implement_feature" and intent_analysis.get("context_requirements", {}).get("code_examples") in ["needed", "helpful"] and not any(step.step == STEP_GENERATE_TESTS for step in adapted_plan.steps):
+            test_step = PlanStep(
+                step=STEP_GENERATE_TESTS,
+                description="Generate tests for the new functionality",
+                inputs=["code_changes", "requirements"],
+                outputs=["test_code"],
+                estimated_time=8,
+                critical=False
+            )
+            
+            # Insert before verification if it exists, otherwise at the end
+            verification_index = next((i for i, step in enumerate(adapted_plan.steps) if step.step == STEP_VERIFY_CHANGES), len(adapted_plan.steps))
+            adapted_plan.insert_step(verification_index, test_step)
+            
+        return adapted_plan
+    
+    def _generate_adaptive_prompt(self, query: str, conversation_history: Optional[List[Dict[str, str]]] = None,
+                               code_context: Optional[str] = None, 
+                               intent_analysis: Optional[Dict[str, Any]] = None,
+                               clarity_assessment: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Generate an adaptive system prompt based on query context and analysis.
+        
+        Args:
+            query: The user's query
+            conversation_history: Optional conversation history
+            code_context: Optional code context
+            intent_analysis: Optional intent analysis
+            clarity_assessment: Optional clarity assessment
+            
+        Returns:
+            A customized system prompt
+        """
+        additional_context = []
+        
+        # Add context about query type and intent
+        if intent_analysis:
+            primary_intent = intent_analysis.get("primary_intent", "unknown")
+            confidence = intent_analysis.get("confidence", 0.0)
+            additional_context.append(f"This query involves a {primary_intent} request with confidence {confidence:.2f}.")
+            
+            # Add specific guidance based on intent
+            if primary_intent == "fix_error":
+                additional_context.append("Focus on diagnostic steps followed by targeted fixes.")
+            elif primary_intent == "implement_feature":
+                additional_context.append("Focus on requirements gathering, design, implementation, and testing.")
+            elif primary_intent == "refactor_code":
+                additional_context.append("Focus on code quality, maintainability, and preserving functionality.")
+            elif primary_intent == "optimize_performance":
+                additional_context.append("Focus on identifying bottlenecks, benchmarking, and targeted optimizations.")
+        
+        # Add context about clarity
+        if clarity_assessment:
+            is_clear = clarity_assessment.get("is_clear", True)
+            if not is_clear:
+                ambiguities = clarity_assessment.get("ambiguities", [])
+                missing = clarity_assessment.get("missing_context", [])
+                additional_context.append("The query has clarity issues that should be addressed:")
+                if ambiguities:
+                    additional_context.append(f"- Ambiguities: {', '.join(ambiguities)}")
+                if missing:
+                    additional_context.append(f"- Missing context: {', '.join(missing)}")
+        
+        # Add context about conversation
+        if conversation_history and len(conversation_history) > 1:
+            additional_context.append(f"This is part of an ongoing conversation with {len(conversation_history)} prior exchanges.")
+        
+        # Add context about code
+        if code_context:
+            additional_context.append("Relevant code context is available for this query.")
+        
+        # Combine all additional context
+        additional_context_str = "\n".join(additional_context) if additional_context else "No additional context available."
+        
+        # Generate the complete system prompt
+        prompt = self._base_system_prompt.format(additional_context=additional_context_str)
+        return prompt
 
-        # Define default plan based on run type (proactive needs different default)
-        if is_proactive_run:
-             # Default plan for proactive issues might just be analysis initially
-             # The LLM should generate the specific steps based on the issue type
-             default_plan = [
-                 # {"step": STEP_ANALYZE_CODE}, # Maybe start with analysis of the issue?
-                 # {"step": STEP_GENERATE_FIX}  # Or directly try to generate a fix?
-                 # Let's rely on the LLM prompt for proactive default for now. If it fails, return empty.
-                 [] 
-             ]
-             # Ensure proactive issues are serializable for the prompt
-             try:
-                 proactive_issues_str = json.dumps(proactive_issues, indent=2)
-             except TypeError:
-                 logger.error("Could not serialize proactive issues for LLM prompt.")
-                 proactive_issues_str = "[Error serializing issues]"
-        else:
-             # Keep the original default plan for user queries
-             default_plan = [
-                 {"step": STEP_ASSESS_CLARITY},
-                 {"step": STEP_EXTRACT_KEYWORDS},
-                 {"step": STEP_DECOMPOSE_QUERY},
-                 {
-                     "step": STEP_SEARCH_CODE_VECTOR,
-                     "query": query or "", 
-                     "use_keywords": True
-                 },
-                 {"step": STEP_ANALYZE_CODE},
-                 {"step": STEP_GENERATE_FIX}
-             ]
-             proactive_issues_str = "N/A" # Not applicable for user query
-
+    async def create_plan(self, query: str, 
+                     conversation_history: Optional[List[Dict[str, str]]] = None,
+                     code_context: Optional[str] = None,
+                     intent_analysis: Optional[Dict[str, Any]] = None,
+                     clarity_assessment: Optional[Dict[str, Any]] = None,
+                     query_type: Optional['QueryType'] = None) -> ExecutionPlan:
+        """
+        Create an execution plan for resolving a query.
+        
+        Args:
+            query: The user query to plan for.
+            conversation_history: Optional list of previous messages
+            code_context: Optional context about the code being discussed
+            intent_analysis: Optional pre-computed intent analysis
+            clarity_assessment: Optional pre-computed clarity assessment
+            query_type: Optional query type from Reflector
+            
+        Returns:
+            An ExecutionPlan object with steps to resolve the query
+        """
         if not self.provider:
-            logger.warning(f"LLM Provider not available for dynamic planning ({run_type}). Using default plan.")
-            return default_plan if not is_proactive_run else [] # Return empty for failed proactive planning
-
-        try:
-            # === Construct the Planning Prompt ===
-            prompt_header = f"Analyze the context and determine the best plan to fulfill the request ({run_type})."
-            prompt_goal = "The goal is to find relevant code/information and provide fixes or analysis, potentially applying the fixes."
-            if is_proactive_run:
-                 prompt_goal = "The goal is to generate a plan to address the identified proactive issues, potentially generating and applying fixes."
-                 
-            available_steps = f"""
-            Available steps:
-            - Core: {STEP_ASSESS_CLARITY}, {STEP_EXTRACT_KEYWORDS}, {STEP_DECOMPOSE_QUERY}, {STEP_SEARCH_CODE_VECTOR}, {STEP_ANALYZE_CODE}, {STEP_GENERATE_FIX}, {STEP_APPLY_FIX}, {STEP_VALIDATE_CODE}.
-            - External Search: {STEP_WEB_SEARCH}, {STEP_GITHUB_SEARCH}, {STEP_STACKOVERFLOW_SEARCH}.
-            - Package/Docs/Vulns: {STEP_SEARCH_PKG_MANAGER}, {STEP_FETCH_DOCS_URL}, {STEP_SCRAPE_DOCS}, {STEP_EXTRACT_LLM}, {STEP_CHECK_VULNS}.
-            - File Update: {STEP_UPDATE_DEPENDENCY_FILE} (Use for applying dependency updates).
-            """
+            logger.error("LLM Provider not available for planning.")
+            return self._get_general_template()
+        
+        # Use available analysis or default to general
+        if query_type:
+            # Get template based on query type from Reflector
+            template = self._generate_plan_template_from_query_type(query_type)
+        elif intent_analysis:
+            # Select template based on intent
+            primary_intent = intent_analysis.get("primary_intent", "other")
+            confidence = intent_analysis.get("confidence", 0.0)
             
-            guidelines = f"""
-            Guidelines:
-            {'1. If user query: Always start with: ' + STEP_ASSESS_CLARITY + ', ' + STEP_EXTRACT_KEYWORDS + ', ' + STEP_DECOMPOSE_QUERY + '.' if not is_proactive_run else '1. If proactive issues: Analyze the issues and generate appropriate steps directly.'}
-            2.  Include {STEP_SEARCH_CODE_VECTOR} to search the local codebase if understanding local context or usage is needed (e.g., before updating a dependency).
-            3.  External Search: 
-                - Use {STEP_WEB_SEARCH} for general info, latest updates, external docs, troubleshooting errors.
-                - Use {STEP_STACKOVERFLOW_SEARCH} for common programming questions/errors/how-tos (add 'language' tag).
-                - Use {STEP_GITHUB_SEARCH} for finding code examples in specific repos or searching GitHub broadly (add 'language' tag).
-            4.  Package/Docs/Vulns (Use when query or issue implies specific library/package interaction):
-                - Use {STEP_SEARCH_PKG_MANAGER} to find info about a package. Requires 'manager_type' and 'query'.
-                - Use {STEP_FETCH_DOCS_URL} *after* finding a package/repo to get its documentation URL. Requires 'source_type' and 'package_name'.
-                - Use {STEP_SCRAPE_DOCS} *after* {STEP_FETCH_DOCS_URL}. Requires 'url'.
-                - Use {STEP_EXTRACT_LLM} *after* {STEP_SCRAPE_DOCS} or getting other text content. Requires 'prompt_key'.
-                - Use {STEP_CHECK_VULNS} to check for vulnerabilities. Requires 'source_type', 'package_name', 'version'.
-            5.  Analysis/Fix:
-                - Place search/data gathering steps generally *before* {STEP_ANALYZE_CODE}.
-                - {STEP_ANALYZE_CODE} should consolidate information gathered about the query or issue.
-                - {STEP_GENERATE_FIX} should follow {STEP_ANALYZE_CODE}.
-                - If the fix involves updating a dependency file, {STEP_GENERATE_FIX} might output parameters for {STEP_UPDATE_DEPENDENCY_FILE}.
-                - {STEP_UPDATE_DEPENDENCY_FILE} updates the dependency file directly. Requires 'file_path', 'package_name', 'new_version'.
-                - {STEP_VALIDATE_CODE} can follow {STEP_GENERATE_FIX} or {STEP_UPDATE_DEPENDENCY_FILE} if validation is beneficial.
-                - {STEP_APPLY_FIX} applies general code fixes generated by {STEP_GENERATE_FIX}.
-            6.  Parameter Requirements: (List specific requirements as before)
-                - {STEP_UPDATE_DEPENDENCY_FILE} needs 'file_path', 'package_name', 'new_version'.
-                (Add requirements for other steps here)
-            """
+            logger.info(f"Planning based on intent: {primary_intent} with confidence {confidence}")
             
-            # Define context_section and output_instructions before they are used
-            context_section = f"""
-            {'--- User Query Context ---' if not is_proactive_run else '--- Proactive Issues Context ---'}
-            {'User Query: "' + (query or 'N/A') + '"' if not is_proactive_run else ''}
-            {'Keywords: ' + str(extracted_keywords or []) if not is_proactive_run else ''}
-            {'Decomposed Queries: ' + str(decomposed_queries or []) if not is_proactive_run else ''}
-            {'Proactive Issues Found:' + proactive_issues_str if is_proactive_run else ''}
-            """
-            output_instructions = f"""
-            Output ONLY a valid JSON list of plan step dictionaries.
-            Example (Proactive: Update outdated 'requests' lib in requirements.txt):
-            [ 
-              {{ # Optionally check vulnerabilities first
-                "step": "{STEP_CHECK_VULNS}", "source_type": "pypi", "package_name": "requests", "version": "[from issue context]" 
-              }}, 
-              {{ # Search local usage before update
-                "step": "{STEP_SEARCH_CODE_VECTOR}", "query": "Usage of requests library", "use_keywords": false 
-              }},
-              {{ # Analyze potential impact
-                "step": "{STEP_ANALYZE_CODE}" 
-              }},
-              {{ # Generate the file update instruction (alternative to generic fix)
-                "step": "{STEP_UPDATE_DEPENDENCY_FILE}", "file_path": "[from issue context]", "package_name": "requests", "new_version": "[from issue context]"
-              }}
-              {{ # Optionally validate after update (e.g., run tests)
-                # "step": "{STEP_VALIDATE_CODE}" 
-              }} 
-            ]
-
-            Return ONLY the JSON list.
-            """
-            
-            planning_prompt = f"{prompt_header}\n{prompt_goal}\n\n{available_steps}\n\n{guidelines}\n\n{context_section}\n\n{output_instructions}"
-
-            messages = [
-                {"role": "system", "content": "You are a planning assistant. Generate a JSON plan based on the provided context (user query or proactive issues), following the guidelines and available steps."}, 
-                {"role": "user", "content": planning_prompt}
-            ]
-
-            raw_response = await self.provider.generate_completion(messages, temperature=0.1)
-            
-            # Attempt to extract JSON even if there's surrounding text
-            json_match = re.search(r'\[.*\]', raw_response, re.DOTALL)
-            if json_match:
-                 cleaned_response = json_match.group(0)
-            else:
-                 # Fallback to previous cleaning attempt if no clear JSON list is found
-                 cleaned_response = re.sub(r"^```(?:json)?\s*", "", raw_response, flags=re.MULTILINE)
-                 cleaned_response = re.sub(r"\s*```$", "", cleaned_response, flags=re.MULTILINE).strip()
-
-
-            plan = json.loads(cleaned_response)
-
-            if isinstance(plan, list) and all(isinstance(item, dict) and 'step' in item for item in plan):
-                logger.info(f"Generated dynamic plan using LLM for {run_type}.")
-                # Basic safety net for user queries
-                if not is_proactive_run:
-                     core_steps = {STEP_ASSESS_CLARITY, STEP_EXTRACT_KEYWORDS, STEP_DECOMPOSE_QUERY}
-                     plan_steps_set = {item['step'] for item in plan}
-                     if not core_steps.issubset(plan_steps_set):
-                          logger.warning(f"LLM plan for user query missing core reflection steps, falling back to default.")
-                          return default_plan
+            # Map intent to template
+            template_key = PlanType.GENERAL.value
+            if primary_intent == "fix_error" and confidence > 0.6:
+                template_key = PlanType.ERROR_FIXING.value
+            elif primary_intent == "implement_feature" and confidence > 0.6:
+                template_key = PlanType.FEATURE_IMPLEMENTATION.value
+            elif primary_intent == "refactor_code" and confidence > 0.6:
+                template_key = PlanType.CODE_REFACTORING.value
+            elif primary_intent == "optimize_performance" and confidence > 0.6:
+                template_key = PlanType.PERFORMANCE_OPTIMIZATION.value
+            elif primary_intent == "add_dependency" and confidence > 0.6:
+                template_key = PlanType.DEPENDENCY_MANAGEMENT.value
+            elif primary_intent == "explain_code" and confidence > 0.6:
+                template_key = PlanType.CODE_EXPLANATION.value
                 
-                # Ensure required parameters are defaulted if possible/sensible 
-                for step in plan:
-                    if step['step'] == STEP_SEARCH_CODE_VECTOR:
-                        step.setdefault('query', query or "Analyze code context") # Default query if user query is None
-                        step.setdefault('use_keywords', True if extracted_keywords else False)
-                    # Add more default logic here if needed for other steps
-                         
-                return plan
+            # Get the template from the built-in templates
+            if template_key == PlanType.ERROR_FIXING.value:
+                template = self._get_error_fixing_template()
+            elif template_key == PlanType.FEATURE_IMPLEMENTATION.value:
+                template = self._get_feature_implementation_template()
+            elif template_key == PlanType.CODE_REFACTORING.value:
+                template = self._get_code_refactoring_template()
+            elif template_key == PlanType.PERFORMANCE_OPTIMIZATION.value:
+                template = self._get_performance_optimization_template()
+            elif template_key == PlanType.DEPENDENCY_MANAGEMENT.value:
+                template = self._get_dependency_management_template()
+            elif template_key == PlanType.CODE_EXPLANATION.value:
+                template = self._get_code_explanation_template()
             else:
-                logger.warning(f"LLM generated invalid plan structure for {run_type}. Falling back to default plan.")
-                return default_plan if not is_proactive_run else []
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse plan JSON from LLM for {run_type}: {e}. Response: '{raw_response[:200]}...' Falling back to default plan.")
-            return default_plan if not is_proactive_run else []
+                template = self._get_general_template()
+            
+            # Adapt template based on available analyses
+            template = self._adapt_template_to_context(template, intent_analysis, 
+                                                   clarity_assessment or {})
+            
+            logger.info(f"Selected and adapted the {template_key} template with {len(template.steps)} steps")
+            return template
+        
+        # If no intent analysis or query type, use LLM to generate a custom plan
+        formatted_conversation = self._format_conversation(conversation_history)
+        formatted_code_context = f"Code Context:\n{code_context}" if code_context else "No code context provided."
+        
+        # Generate adaptive system prompt
+        system_prompt = self._generate_adaptive_prompt(
+            query=query,
+            conversation_history=conversation_history,
+            code_context=code_context,
+            intent_analysis=intent_analysis,
+            clarity_assessment=clarity_assessment
+        )
+        
+        user_prompt = f"""
+        Create an execution plan for the following query:
+        
+        QUERY: {query}
+        
+        CONVERSATION HISTORY:
+        {formatted_conversation}
+        
+        {formatted_code_context}
+        
+        Return ONLY a JSON array containing the plan steps. Each step should include "step", "description", "inputs", "outputs", "estimated_time", and "critical" fields.
+        Example:
+        [
+            {{
+                "step": "analyze_intent",
+                "description": "Analyze the query to understand requirements",
+                "inputs": ["query", "conversation_history"],
+                "outputs": ["query_type", "key_requirements"],
+                "estimated_time": 3,
+                "critical": true
+            }},
+            ...
+        ]
+        """
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        try:
+            response = await self.provider.generate_completion(messages, temperature=0.2)
+            
+            # Extract and parse the JSON array
+            json_match = re.search(r'\[.*\]', response, re.DOTALL)
+            if json_match:
+                plan_json = json_match.group(0)
+                plan_steps = json.loads(plan_json)
+                
+                if isinstance(plan_steps, list) and len(plan_steps) > 0:
+                    logger.info(f"Generated plan with {len(plan_steps)} steps")
+                    # Convert to PlanStep objects
+                    steps = [
+                        PlanStep(
+                            step=step["step"],
+                            description=step["description"],
+                            inputs=step["inputs"],
+                            outputs=step["outputs"],
+                            estimated_time=step.get("estimated_time", 5),
+                            critical=step.get("critical", False)
+                        )
+                        for step in plan_steps
+                    ]
+                    
+                    # Create and return the complete plan
+                    return ExecutionPlan(
+                        plan_type=PlanType.GENERAL.value,
+                        steps=steps,
+                        metadata={
+                            "generated_by_llm": True,
+                            "input_query": query
+                        }
+                    )
+                else:
+                    logger.warning("Generated plan has invalid structure")
+            else:
+                logger.warning("No valid JSON array found in plan response.")
+                
+            # Fall back to a default plan if generation fails
+            logger.info("Using default plan as fallback")
+            return self._get_general_template()
+            
         except Exception as e:
-            logger.error(f"Error during dynamic planning for {run_type}: {e}. Falling back to default plan.", exc_info=True)
-            return default_plan if not is_proactive_run else [] 
+            logger.error(f"Error during plan creation: {e}", exc_info=True)
+            return self._get_general_template()
+    
+    def _format_conversation(self, conversation_history: Optional[List[Dict[str, str]]]) -> str:
+        """Format conversation history for inclusion in prompts."""
+        if not conversation_history:
+            return "No previous conversation."
+        
+        formatted_history = ""
+        for i, message in enumerate(conversation_history):
+            role = message.get("role", "unknown").capitalize()
+            content = message.get("content", "")
+            formatted_history += f"{role}: {content}\n\n"
+            
+            # Limit history length to avoid token issues
+            if i >= 5:  # Only include the most recent 6 messages
+                formatted_history = "...(earlier conversation omitted)...\n\n" + formatted_history
+                break
+                
+        return formatted_history 

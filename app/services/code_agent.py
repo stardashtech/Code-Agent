@@ -1054,9 +1054,11 @@ Example response format:
                 code_context=code_context_for_reflection
             )
             
-            is_clear = clarity_result == 'CLEAR'
-            clarification_question = None if is_clear else clarity_result
-            clarity_reason = None if is_clear else "Query assessed as ambiguous by Reflector." # Simplified reason
+            # clarity_result bir string değil sözlük (dictionary) olduğundan
+            # "is_clear" değerini doğrudan sözlükten almalıyız
+            is_clear = clarity_result.get("is_clear", False)
+            clarification_question = None if is_clear else clarity_result.get("clarity_reasoning")
+            clarity_reason = None if is_clear else clarity_result.get("clarity_reasoning", "Query assessed as ambiguous by Reflector.")
 
             keywords = await self.reflector.extract_keywords(
                 query=query, 
@@ -1071,8 +1073,10 @@ Example response format:
             # Use the planner to create the plan
             plan = await self.planner.create_plan(
                 query=query, 
-                extracted_keywords=keywords, 
-                decomposed_queries=decomposed_queries
+                conversation_history=execution_context["conversation_history"],
+                code_context=code_context_for_reflection,
+                intent_analysis=None,  # Şu an için intent_analysis sağlamıyoruz
+                clarity_assessment=clarity_result
             )
             
             # --- Consolidate results ---

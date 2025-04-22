@@ -3,7 +3,7 @@ from typing import List, Dict, Optional, Any
 import json # For parsing potential JSON output from LLM
 
 # LLM client import
-from models.llm import LlmInterface, get_llm_client
+from app.models.llm import LlmInterface, get_llm_client
 
 logger = logging.getLogger(__name__)
 
