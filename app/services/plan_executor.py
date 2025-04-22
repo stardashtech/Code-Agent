@@ -31,7 +31,7 @@ from app.agents.planner import (
     STEP_SCRAPE_DOCS, STEP_EXTRACT_LLM, STEP_CHECK_VULNS,
     STEP_SEARCH_CODE_VECTOR, STEP_WEB_SEARCH, STEP_GITHUB_SEARCH,
     STEP_STACKOVERFLOW_SEARCH, STEP_ANALYZE_CODE, STEP_GENERATE_FIX,
-    STEP_APPLY_FIX, STEP_VALIDATE_CODE
+    STEP_APPLY_FIX, STEP_VALIDATE_CODE, STEP_FINAL_REPORT
     # Import others if needed
 )
 
@@ -112,7 +112,7 @@ class PlanExecutor:
 
     async def execute_plan(
         self,
-        plan: List[Dict[str, Any]],
+        plan: List[Any],  # Allow List[Any] to accommodate both Dict and PlanStep types
         execution_context: Dict[str, Any],
         response_data: Dict[str, Any]
     ) -> None:
@@ -121,18 +121,37 @@ class PlanExecutor:
         query = execution_context["query"] # Get query from context
 
         for step_index, step_details in enumerate(plan): # Use step_details consistently
-            step_name = step_details.get("step")
+            # Check if step_details is a Dict or PlanStep object and handle accordingly
+            if hasattr(step_details, 'step'):
+                # It's a PlanStep object, access attributes directly
+                step_name = step_details.step
+            else:
+                # It's a dictionary, use get method
+                step_name = step_details.get("step")
+            
             logger.info(f"Executing step {step_index + 1}/{len(plan)}: {step_name}")
 
             try:
                 # === Existing Core Steps (Refactored slightly for clarity) ===
                 if step_name == STEP_SEARCH_CODE_VECTOR:
-                    search_query = step_details.get('query', query) # Use step_details
-                    use_keywords = step_details.get('use_keywords', True) # Use step_details
+                    # Get parameters safely based on object type
+                    if hasattr(step_details, 'query'):
+                        search_query = step_details.query
+                        use_keywords = getattr(step_details, 'use_keywords', True)
+                    else:
+                        search_query = step_details.get('query', query)
+                        use_keywords = step_details.get('use_keywords', True)
+                    
                     if use_keywords and execution_context.get('keywords'):
                          search_query += f" {' '.join(execution_context['keywords'])}"
                     logger.info(f"Performing vector search with query: '{search_query}'")
-                    code_filter = step_details.get('filter', {"type": "code_master"}) # Use step_details
+                    
+                    # Get filter safely based on object type
+                    if hasattr(step_details, 'filter'):
+                        code_filter = step_details.filter
+                    else:
+                        code_filter = step_details.get('filter', {"type": "code_master"})
+                    
                     snippets = []
                     if self._vector_store_manager:
                         snippets = await self._vector_store_manager.search_code(search_query, filter_dict=code_filter)
@@ -144,8 +163,14 @@ class PlanExecutor:
 
                 # === External Search Steps (Refactored for consistency) ===
                 elif step_name == STEP_WEB_SEARCH:
-                    web_query = step_details.get('query', query) # Use step_details
-                    max_results = step_details.get('max_results', 5) # Use step_details
+                    # Get parameters safely based on object type
+                    if hasattr(step_details, 'query'):
+                        web_query = step_details.query
+                        max_results = getattr(step_details, 'max_results', 5)
+                    else:
+                        web_query = step_details.get('query', query)
+                        max_results = step_details.get('max_results', 5)
+                    
                     logger.info(f"Performing web search: '{web_query}'")
                     results = []
                     provider = self.agent.web_search_provider # Assuming agent has this
@@ -163,8 +188,14 @@ class PlanExecutor:
                     response_data["results"]["web_search_results"] = results
 
                 elif step_name == STEP_GITHUB_SEARCH:
-                    gh_query = step_details.get('query', query) # Use step_details
-                    language = step_details.get('language') # Use step_details
+                    # Get parameters safely based on object type
+                    if hasattr(step_details, 'query'):
+                        gh_query = step_details.query
+                        language = getattr(step_details, 'language', None)
+                    else:
+                        gh_query = step_details.get('query', query)
+                        language = step_details.get('language')
+                    
                     logger.info(f"Performing GitHub search: '{gh_query}' (Lang: {language or 'any'})")
                     results = []
                     # Use the search provider directly
@@ -182,10 +213,82 @@ class PlanExecutor:
                     execution_context["github_results"] = results
                     response_data["results"]["github_search_results"] = results
 
+                # === Tool Usage Example Handling ===
+                elif step_name == "prepare_tool_demo":
+                    tool_name = execution_context.get("tool_name", "")
+                    # Get tool_name from step_details if not in execution_context
+                    if not tool_name:
+                        if hasattr(step_details, 'tool_name'):
+                            tool_name = step_details.tool_name
+                        else:
+                            tool_name = step_details.get("tool_name", "")
+                            
+                    usage_examples = execution_context.get("usage_examples", [])
+                    
+                    logger.info(f"Preparing demonstration for tool: {tool_name}")
+                    
+                    # Eğer tool_name boşsa, sorgudan tahmini bir tool ismi çıkaralım
+                    if not tool_name:
+                        query_lower = execution_context.get("query", "").lower()
+                        if "github" in query_lower:
+                            tool_name = "GitHub Search Tool"
+                        elif "web" in query_lower and "search" in query_lower:
+                            tool_name = "Web Search Tool"
+                        elif "stackoverflow" in query_lower:
+                            tool_name = "StackOverflow Search Tool"
+                        else:
+                            tool_name = "requested tool"
+                    
+                    # Tool kullanım örneği oluştur
+                    demo_prompt = f"""
+                    Create a comprehensive usage guide with examples for the '{tool_name}' tool.
+                    
+                    Include the following:
+                    1. Brief description of what the tool does
+                    2. How to use the tool (basic syntax and parameters)
+                    3. At least 2 practical usage examples with code snippets
+                    4. Common pitfalls or tips for effective use
+                    
+                    Based on these usage examples (if available): {usage_examples}
+                    """
+                    
+                    try:
+                        messages = [
+                            {"role": "system", "content": "You are a developer tools documentation expert."},
+                            {"role": "user", "content": demo_prompt}
+                        ]
+                        
+                        tool_demonstration = await self.agent.generate_completion(messages)
+                        logger.info(f"Generated tool demonstration for {tool_name}")
+                        
+                        execution_context["tool_demonstration"] = tool_demonstration
+                        execution_context["sample_code"] = tool_demonstration  # Aynı içeriği sample_code olarak da kaydediyoruz
+                        response_data["results"]["tool_usage_guide"] = tool_demonstration
+                        
+                    except Exception as e:
+                        logger.error(f"Error generating tool demonstration: {e}", exc_info=True)
+                        execution_context["tool_demonstration"] = f"Error generating tool demonstration: {e}"
+                
+                # === Final Report Step - Enhanced for Tool Usage ===
+                elif step_name == STEP_FINAL_REPORT:
+                    # Tool kullanım klavuzu için özel durum
+                    if execution_context.get("tool_demonstration"):
+                        logger.info("Generating final report for tool usage guide")
+                        response_data["status"] = "completed"
+                        response_data["message"] = "Tool usage guide generated successfully."
+                        # Final sonucu zaten response_data["results"]["tool_usage_guide"] içinde
+                        continue
+
                 # === New Package/Docs/Vulns Steps ===
                 elif step_name == STEP_SEARCH_PKG_MANAGER:
-                     manager_type = step_details.get('manager_type') # Use step_details
-                     pkg_query = step_details.get('query', query) # Use step_details
+                     # Get parameters safely based on object type
+                     if hasattr(step_details, 'manager_type'):
+                         manager_type = step_details.manager_type
+                         pkg_query = getattr(step_details, 'query', query)
+                     else:
+                         manager_type = step_details.get('manager_type')
+                         pkg_query = step_details.get('query', query)
+                         
                      logger.info(f"Searching package manager ({manager_type or 'unknown'}) for: '{pkg_query}'")
                      client = self._get_package_client(manager_type)
                      results = []
@@ -205,8 +308,14 @@ class PlanExecutor:
                      response_data["results"][context_key] = results
                      
                 elif step_name == STEP_FETCH_DOCS_URL:
-                     source_type = step_details.get('source_type') # Use step_details
-                     package_name = step_details.get('package_name') # Name or repo identifier # Use step_details
+                     # Get parameters safely based on object type
+                     if hasattr(step_details, 'source_type'):
+                         source_type = step_details.source_type
+                         package_name = getattr(step_details, 'package_name', '')
+                     else:
+                         source_type = step_details.get('source_type')
+                         package_name = step_details.get('package_name')
+                     
                      if not source_type or not package_name:
                          logger.warning(f"Skipping {step_name}: Missing 'source_type' or 'package_name' in plan step.")
                          execution_context["documentation_url"] = None
@@ -233,8 +342,16 @@ class PlanExecutor:
                          # response_data["results"]["documentation_url"] = doc_url
                          
                 elif step_name == STEP_SCRAPE_DOCS:
-                     # Get URL from context (likely set by previous step)
-                     url_to_scrape = step_details.get('url') or execution_context.get("documentation_url") # Use step_details
+                     # Get parameters safely based on object type
+                     if hasattr(step_details, 'url'):
+                         url_to_scrape = step_details.url
+                     else:
+                         url_to_scrape = step_details.get('url')
+                     
+                     # If not provided in step_details, try getting from execution_context
+                     if not url_to_scrape:
+                         url_to_scrape = execution_context.get("documentation_url")
+                     
                      if not url_to_scrape:
                          logger.warning(f"Skipping {step_name}: No URL provided in step or context.")
                          execution_context["scraped_content"] = None
@@ -254,7 +371,16 @@ class PlanExecutor:
                          response_data["results"]["scraped_content_summary"] = (content[:500] + '...') if content and len(content) > 500 else content
                          
                 elif step_name == STEP_EXTRACT_LLM:
-                     prompt_key = step_details.get('prompt_key') # Use step_details
+                     # Get parameters safely based on object type
+                     if hasattr(step_details, 'prompt_key'):
+                         prompt_key = step_details.prompt_key
+                         # Allow plan to provide extra context through the context attribute
+                         llm_context = getattr(step_details, 'context', {})
+                     else:
+                         prompt_key = step_details.get('prompt_key')
+                         # Allow plan to provide extra context
+                         llm_context = step_details.get('context', {})
+                     
                      # Get content preferentially from 'scraped_content', fallback to snippets?
                      content_to_analyze = execution_context.get("scraped_content")
                      
@@ -269,8 +395,7 @@ class PlanExecutor:
                          execution_context["llm_extracted_info"] = None
                      else:
                          logger.info(f"Extracting information using LLM with prompt key: '{prompt_key}'")
-                         # Pass relevant context for prompt formatting
-                         llm_context = step_details.get('context', {}) # Allow plan to provide extra context # Use step_details
+                         # Update context with relevant fields from execution_context
                          llm_context.update({
                              'language': execution_context.get('language'), # Infer language if possible
                              'package_name': execution_context.get('package_name') # Infer package name
@@ -284,12 +409,18 @@ class PlanExecutor:
                               logger.error(f"Error during LLM information extraction: {e}", exc_info=True)
                          execution_context["llm_extracted_info"] = extracted_info
                          # Store potentially structured info in response
-                         response_data["results"][f"extracted_{prompt_key}"] = extracted_info 
+                         response_data["results"][f"extracted_{prompt_key}"] = extracted_info
                          
                 elif step_name == STEP_CHECK_VULNS:
-                     source_type = step_details.get('source_type') # e.g., pypi, nuget # Use step_details
-                     package_name = step_details.get('package_name') # Use step_details
-                     version = step_details.get('version') # Needs version context! # Use step_details
+                     # Get parameters safely based on object type
+                     if hasattr(step_details, 'source_type'):
+                         source_type = step_details.source_type
+                         package_name = getattr(step_details, 'package_name', '')
+                         version = getattr(step_details, 'version', '')
+                     else:
+                         source_type = step_details.get('source_type')
+                         package_name = step_details.get('package_name')
+                         version = step_details.get('version')
                      
                      if not all([source_type, package_name, version]):
                          logger.warning(f"Skipping {step_name}: Missing 'source_type', 'package_name', or 'version' in plan step or context.")

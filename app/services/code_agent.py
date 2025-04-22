@@ -18,7 +18,8 @@ import ast # Import ast module
 
 from app.config import settings
 from app.agents.reflector import Reflector
-from app.agents.planner import Planner
+from app.agents.planner import Planner, ExecutionPlan # <-- Add ExecutionPlan import
+from app.agents.planner import PlanType # <-- Import PlanType
 from app.services.vector_store_manager import VectorStoreManager
 from app.services.sandbox_runner import SandboxRunner, SandboxExecutionResult
 from app.services.docker_runner import DockerSandboxRunner
@@ -1056,7 +1057,10 @@ Example response format:
             
             # clarity_result bir string değil sözlük (dictionary) olduğundan
             # "is_clear" değerini doğrudan sözlükten almalıyız
-            is_clear = clarity_result.get("is_clear", False)
+            # Ancak sistem çok katı olduğu için, clarity_score'u da dikkate alarak
+            # belirli bir eşiğin üzerindeyse açık kabul edelim (0.3 eşik değeri)
+            clarity_score = clarity_result.get("clarity_score", 0.0)
+            is_clear = clarity_result.get("is_clear", False) or clarity_score > 0.3
             clarification_question = None if is_clear else clarity_result.get("clarity_reasoning")
             clarity_reason = None if is_clear else clarity_result.get("clarity_reasoning", "Query assessed as ambiguous by Reflector.")
 
@@ -1081,19 +1085,52 @@ Example response format:
             
             # --- Consolidate results ---
             reflection_results = {
-                "is_clear": is_clear,
+                # is_clear değerini plan türüne göre yeniden değerlendireceğiz
+                # "is_clear": is_clear,
                 "clarity_reason": clarity_reason,
                 "clarification_question": clarification_question,
                 "keywords": keywords,
                 "decomposition": decomposed_queries,
-                "plan": plan
+                "plan": plan # plan nesnesini burada saklayalım
             }
-            # --- End Reflector/Planner calls ---
+            
+            # --- Loglama için Planı Serileştirme --- 
+            try:
+                plan_dict = plan.model_dump() # Pydantic v2+ varsayımı
+                logger.info(f"Generated Plan: {json.dumps(plan_dict, indent=2)}")
+            except AttributeError: # Pydantic v1 fallback
+                 try:
+                     plan_dict = plan.dict()
+                     logger.info(f"Generated Plan (v1): {json.dumps(plan_dict, indent=2)}")
+                 except Exception as dump_err:
+                     logger.error(f"Could not serialize ExecutionPlan object for logging: {dump_err}")
+                     logger.info("Generated Plan: [Could not serialize]") 
+            except Exception as dump_err:
+                 logger.error(f"Could not serialize ExecutionPlan object for logging: {dump_err}")
+                 logger.info("Generated Plan: [Could not serialize]") 
+            # --- Bitiş: Loglama --- 
+                 
+            # --- Clarity Kontrolünü Plan Türüne Göre Ayarlama --- 
+            # Plan türünü alalım (ExecutionPlan nesnesinden)
+            plan_type = getattr(plan, 'plan_type', PlanType.GENERAL.value) # Default to general if missing
+            
+            # Eğer plan türü 'tool_usage' ise, Reflector'un düşük skoruna rağmen devam etmeyi dene.
+            # Diğer durumlarda orijinal (biraz gevşetilmiş) is_clear kontrolünü kullan.
+            if plan_type == "tool_usage":
+                logger.info("Plan type is 'tool_usage', bypassing strict clarity check.")
+                final_is_clear = True # Tool kullanımı örneği istendiği için devam et
+            else:
+                final_is_clear = is_clear # Orijinal (gevşetilmiş) kontrolü kullan
+                
+            # Güncellenmiş final_is_clear değerini reflection_results'e ekleyelim
+            reflection_results["is_clear"] = final_is_clear
+            # --- Bitiş: Clarity Ayarlama --- 
             
             execution_context.update(reflection_results)
             response_data["results"]["reflection"] = reflection_results # Include reflection details
 
-            if not is_clear: # Use the determined clarity flag
+            # Güncellenmiş final_is_clear değerini kullanarak netleştirme gerekip gerekmediğini kontrol et
+            if not final_is_clear:
                 logger.warning(f"Query assessed as unclear: {clarity_reason}")
                 response_data["status"] = "clarification_needed"
                 response_data["message"] = clarification_question or "The query is unclear. Please provide more details."
@@ -1103,16 +1140,8 @@ Example response format:
                  logger.error("Planner failed to generate a plan.")
                  return self._generate_error_response("Failed to generate execution plan.")
                  
-            # plan = reflection_results["plan"] # Plan is already assigned
-            logger.info(f"Generated Plan: {json.dumps(plan, indent=2)}")
-
-            # 2. Execution Phase (using PlanExecutor)
-            logger.info("Phase 2: Execution")
-            if not self.plan_executor:
-                 logger.error("PlanExecutor not initialized.")
-                 return self._generate_error_response("Internal Error: PlanExecutor not available.")
-                 
-            await self.plan_executor.execute_plan(plan, execution_context, response_data)
+            # ExecutionPlan nesnesinin kendisi yerine adımlar listesini (.steps) gönder
+            await self.plan_executor.execute_plan(plan.steps, execution_context, response_data)
             # execute_plan updates response_data directly
             
             # 3. Finalization/Saving (Optional)

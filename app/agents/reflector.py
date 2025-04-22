@@ -289,6 +289,18 @@ Provide a detailed assessment that helps determine if clarification is needed be
         """
         query_lower = query.lower()
         
+        # Tool kullanımına dair belirteçler - Araç odaklı sorguları daha iyi tanımak için
+        tool_usage_indicators = [
+            "how to use", "using", "example of", "examples of", "show me", "demonstrate", 
+            "how do i use", "can you show", "how can i", "search tool", "github search", 
+            "stackoverflow search", "web search", "tool", "example", "api", "function"
+        ]
+        
+        # Bir tool/API hakkında soru soruyorsa - genel olarak işle
+        if any(indicator in query_lower for indicator in tool_usage_indicators):
+            logger.info("Query classified as tool usage related.")
+            return QueryType.GENERAL
+        
         # More comprehensive indicators for each query type
         error_indicators = [
             "error", "exception", "fail", "bug", "issue", "traceback", "not working", 
@@ -331,6 +343,23 @@ Provide a detailed assessment that helps determine if clarification is needed be
             "pattern", "microservice", "monolith", "decoupling", "separation of concerns",
             "layered", "mvc", "mvvm", "organization", "blueprint", "framework"
         ]
+        
+        # Github, npm, docker gibi belirli tool isimlerini kontrol et
+        if "github" in query_lower or "git" in query_lower.split():
+            logger.info("Query contains GitHub reference. Classified as GENERAL.")
+            return QueryType.GENERAL
+            
+        if "npm" in query_lower or "pypi" in query_lower or "package" in query_lower:
+            logger.info("Query contains package manager reference. Classified as DEPENDENCY.")
+            return QueryType.DEPENDENCY
+            
+        if "docker" in query_lower or "container" in query_lower:
+            logger.info("Query contains Docker reference. Classified as CODE_SPECIFIC.")
+            return QueryType.CODE_SPECIFIC
+            
+        if "search" in query_lower:
+            logger.info("Query contains search reference. Classified as GENERAL.")
+            return QueryType.GENERAL
         
         # Check for indicators in the query with more sophisticated matching
         if any(indicator in query_lower for indicator in error_indicators):

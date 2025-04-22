@@ -4,10 +4,17 @@ from typing import List, Dict, Any, Optional
 
 import aiohttp
 from tavily import TavilyClient
+import httpx
+import asyncio
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# --- Yeniden Deneme ve Rate Limit Yapılandırması ---
+TAVILY_MAX_RETRIES = 3
+TAVILY_INITIAL_DELAY = 1.5 # saniye
+TAVILY_BACKOFF_FACTOR = 2
 
 class WebSearchProvider:
     """Base class for web search providers."""
@@ -17,77 +24,113 @@ class WebSearchProvider:
 class TavilySearchProvider(WebSearchProvider):
     """Provides search functionality using the Tavily API."""
     def __init__(self, api_key: Optional[str] = None):
-        effective_api_key = api_key or settings.tavily_api_key
-        if not effective_api_key:
-            logger.warning("Tavily API key not provided. Tavily search will not be available.")
-            self.client = None
-        else:
-            try:
-                self.client = TavilyClient(api_key=effective_api_key)
-                logger.info("TavilySearchProvider initialized successfully.")
-            except Exception as e:
-                logger.error(f"Failed to initialize TavilyClient: {e}", exc_info=True)
-                self.client = None
-
-    async def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-        """Perform a search using the Tavily API.
+        """
+        Initializes the Tavily Search Provider.
 
         Args:
-            query: The search query string.
-            max_results: The maximum number of results to return.
+            api_key: Tavily API key. If None, attempts to read from settings.
+        """
+        self.api_key = api_key or settings.tavily_api_key
+        if not self.api_key:
+            logger.error("Tavily API key is not configured. Web search will fail.")
+            # Raise error or disable? Disabling is safer for agent startup.
+            self.client = None
+            # raise ValueError("Tavily API key is missing.")
+        else:
+            try:
+                # Initialize TavilyClient asynchronously if possible, otherwise sync
+                # As of tavily-python 0.3.3, client seems synchronous internally
+                # but we use async structure for consistency.
+                self.client = TavilyClient(api_key=self.api_key)
+                # Test connection immediately? TavilyClient doesn't have a direct ping.
+                # We'll rely on the first search call to validate.
+                logger.info("TavilySearchProvider initialized successfully.")
+            except Exception as e:
+                 logger.error(f"Failed to initialize TavilyClient: {e}", exc_info=True)
+                 self.client = None
+
+    async def search(self, query: str, search_depth: str = "basic", max_results: int = 5, 
+                     include_domains: Optional[List[str]] = None, 
+                     exclude_domains: Optional[List[str]] = None) -> List[Dict]:
+        """
+        Performs a web search using the Tavily API.
+
+        Args:
+            query: The search query.
+            search_depth: "basic" or "advanced". Advanced is more comprehensive but uses more credits.
+            max_results: Maximum number of results to return.
+            include_domains: Optional list of domains to include.
+            exclude_domains: Optional list of domains to exclude.
 
         Returns:
-            A list of search result dictionaries, or an empty list if search fails.
+            A list of search result dictionaries or an empty list on error.
         """
         if not self.client:
             logger.error("Tavily client not initialized. Cannot perform search.")
+            return [{"error": "Tavily client not configured."}]
+            
+        if not query:
+            logger.warning("Tavily search called with empty query.")
             return []
 
-        try:
-            logger.debug(f"Performing Tavily search for query: '{query}' with max_results={max_results}")
-            # Use Tavily's search method - it's synchronous, so run in executor
-            # Tavily client handles async internally if event loop is running
-            # but let's use a standard async pattern with aiohttp if available
-            # or run_in_executor if the library is purely sync.
-            # Checking TavilyClient source, it seems to use requests internally.
-            # Best practice is to use an async library like aiohttp or httpx for async code.
-            # However, for simplicity and using the provided client, let's assume
-            # we might need to wrap the sync call if it blocks.
-            # Tavily documentation examples use it directly in async functions,
-            # implying it might handle the event loop context correctly. Let's try direct call first.
+        current_delay = TAVILY_INITIAL_DELAY
+        for attempt in range(TAVILY_MAX_RETRIES + 1):
+            try:
+                logger.info(f"Performing Tavily search (Attempt {attempt + 1}): '{query}'")
+                # TavilyClient.search seems synchronous, run in executor for async context
+                # This might change in future versions of tavily-python
+                loop = asyncio.get_running_loop()
+                response = await loop.run_in_executor(
+                    None, # Use default executor
+                    self.client.search,
+                    query,
+                    search_depth,
+                    max_results,
+                    include_domains,
+                    exclude_domains,
+                    None # include_answer - keep it simple for now
+                )
+                
+                # Tavily returns results directly in a list of dicts (or similar structure)
+                # Example structure (verify with actual Tavily response):
+                # [{'title': '...', 'url': '...', 'content': '...', 'score': ...}]
+                logger.info(f"Tavily search successful. Received {len(response.get('results', []))} results.")
+                return response.get("results", []) # Return the list of results
 
-            response = await self.client.search(query=query, search_depth="advanced", max_results=max_results)
-            # The Tavily library might have changed. The `.search()` method might not be async.
-            # If it blocks, we'll need `loop.run_in_executor`.
-            # Let's assume it works directly for now based on common patterns.
-
-            logger.debug(f"Tavily raw response: {response}")
-
-            # Process results (structure might vary slightly based on Tavily response format)
-            # Assuming 'results' is a key in the response dictionary containing a list
-            search_results = response.get("results", [])
-            if isinstance(search_results, list):
-                 # Format results to a common standard if needed
-                 # Example: {'title': ..., 'url': ..., 'content': ...}
-                 formatted_results = [
-                     {
-                         "title": res.get("title"),
-                         "url": res.get("url"),
-                         "content": res.get("content"), # Or 'snippet'
-                         "score": res.get("score")
-                     }
-                     for res in search_results
-                     if res.get("url") # Ensure result has a URL
-                 ]
-                 logger.info(f"Tavily search successful. Found {len(formatted_results)} results for query: '{query}'")
-                 return formatted_results
-            else:
-                 logger.error(f"Unexpected format for Tavily search results: {type(search_results)}")
-                 return []
-
-        except Exception as e:
-            logger.error(f"Error during Tavily search for query '{query}': {e}", exc_info=True)
-            return []
+            except httpx.HTTPStatusError as e: # Catch specific HTTP errors if tavily uses httpx
+                 # Check for Rate Limit Error (429)
+                 if e.response.status_code == 429:
+                     logger.warning(f"Tavily API rate limit hit (Attempt {attempt + 1}). Retrying after {current_delay:.1f}s...")
+                     if attempt < TAVILY_MAX_RETRIES:
+                         await asyncio.sleep(current_delay)
+                         current_delay *= TAVILY_BACKOFF_FACTOR
+                         continue # Retry
+                     else:
+                         logger.error("Max retries reached for Tavily rate limit.")
+                         return [{"error": "Tavily API rate limit exceeded after retries."}]
+                 # Handle other HTTP errors
+                 else:
+                     logger.error(f"Tavily API HTTP error: {e.response.status_code} - {e.response.text}", exc_info=True)
+                     return [{"error": f"Tavily API HTTP error: {e.response.status_code}"}]
+                     
+            except httpx.RequestError as e: # Catch network-related errors
+                 logger.warning(f"Tavily network error (Attempt {attempt + 1}): {e}. Retrying after {current_delay:.1f}s...")
+                 if attempt < TAVILY_MAX_RETRIES:
+                      await asyncio.sleep(current_delay)
+                      current_delay *= TAVILY_BACKOFF_FACTOR
+                      continue # Retry
+                 else:
+                      logger.error("Max retries reached for Tavily network error.")
+                      return [{"error": "Tavily API network error after retries."}]
+                      
+            except Exception as e: # Catch any other unexpected errors from TavilyClient
+                logger.error(f"Unexpected error during Tavily search: {e}", exc_info=True)
+                # Stop retrying on unexpected errors
+                return [{"error": f"Unexpected error during Tavily search: {e}"}]
+                
+        # Should only be reached if loop finishes without returning (e.g., max retries hit)
+        logger.error("Tavily search failed after all retries.")
+        return [{"error": "Tavily search failed after retries."}]
 
 # Example of potential Google Search Provider (requires google-api-python-client)
 # class GoogleSearchProvider(WebSearchProvider):

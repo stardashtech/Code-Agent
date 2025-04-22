@@ -475,30 +475,81 @@ Return ONLY a JSON array containing the plan steps.
             ]
         )
     
+    def _get_tool_usage_template(self) -> ExecutionPlan:
+        """Return a template for tool usage demonstration plans."""
+        return ExecutionPlan(
+            plan_type="tool_usage",
+            steps=[
+                PlanStep(
+                    step=STEP_ANALYZE_INTENT,
+                    description="Analyze the query to identify which tool the user wants to use",
+                    inputs=["query", "conversation_history"],
+                    outputs=["tool_name", "usage_requirements"],
+                    estimated_time=2,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_SEARCH_CODE_TEXT,
+                    description="Search for examples of the tool's usage in the codebase",
+                    inputs=["tool_name"],
+                    outputs=["usage_examples", "tool_implementation_files"],
+                    estimated_time=3,
+                    critical=True
+                ),
+                PlanStep(
+                    step="prepare_tool_demo",
+                    description="Prepare demonstration of the tool with appropriate examples",
+                    inputs=["tool_name", "usage_examples", "usage_requirements"],
+                    outputs=["tool_demonstration", "sample_code"],
+                    estimated_time=5,
+                    critical=True
+                ),
+                PlanStep(
+                    step=STEP_FINAL_REPORT,
+                    description="Generate a comprehensive guide on tool usage with examples",
+                    inputs=["tool_name", "tool_demonstration", "sample_code"],
+                    outputs=["usage_guide"],
+                    estimated_time=3,
+                    critical=True
+                )
+            ]
+        )
+    
     def _generate_plan_template_from_query_type(self, query_type: 'QueryType') -> ExecutionPlan:
         """
-        Generate a plan template based on the query type from the Reflector.
+        Generate an execution plan template based on query type.
         
         Args:
-            query_type: The type of query as determined by Reflector
+            query_type: The type of query from the Reflector
             
         Returns:
-            An appropriate plan template for the query type
+            An ExecutionPlan template appropriate for the query type
         """
-        from app.agents.reflector import QueryType
+        # Özel bir durumda tool kullanımı şablonunu kontrol et
+        query_type_str = str(query_type.value).lower() if query_type else ""
+        if query_type_str == "general" and ("tool" in query_type_str or "search" in query_type_str or "github" in query_type_str):
+            return self._get_tool_usage_template()
         
-        # Map query types to plan templates
         if query_type == QueryType.ERROR_ANALYSIS:
             return self._get_error_fixing_template()
         elif query_type == QueryType.FEATURE_REQUEST:
             return self._get_feature_implementation_template()
         elif query_type == QueryType.CODE_SPECIFIC:
-            # Determine if it's more like refactoring or explanation
-            # For now, default to explanation
+            # For code-specific, decide between refactoring, optimization, and explanation
+            # based on the specific nature of the query (would require more context)
             return self._get_code_explanation_template()
+        elif query_type == QueryType.PERFORMANCE:
+            return self._get_performance_optimization_template()
         elif query_type == QueryType.DEPENDENCY:
             return self._get_dependency_management_template()
-        else:  # QueryType.GENERAL or unknown
+        elif query_type == QueryType.SECURITY:
+            # For security, we might need a more specialized template
+            # For now, use refactoring with security focus
+            return self._get_code_refactoring_template()
+        elif query_type == QueryType.ARCHITECTURE:
+            # For architecture, use refactoring with architecture focus
+            return self._get_code_refactoring_template()
+        else:
             return self._get_general_template()
     
     def _adapt_template_to_context(self, template: ExecutionPlan, 
